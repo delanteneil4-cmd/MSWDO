@@ -4,6 +4,7 @@ import Login from './Login';
 import Dashboard from './Dashboard';
 import ApplicantDashboard from './ApplicantDashboard';
 import UserManagement from './UserManagement';
+import Apply from './Apply';
 import './App.css'; 
 
 function App() {
@@ -11,6 +12,7 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Login />} />
+        <Route path="/apply" element={<Apply />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/applicant-dashboard" element={<ApplicantDashboard />} />
         <Route path="/user-management" element={<UserManagement />} />

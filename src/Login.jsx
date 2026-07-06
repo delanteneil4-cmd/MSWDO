@@ -342,6 +342,23 @@ const Login = () => {
                       </div>
                       <ChevronRight size={18} className="text-slate-300 group-hover:text-emerald-500 transform group-hover:translate-x-1 transition-all" />
                     </button>
+
+                    {/* Apply for Benefits Button */}
+                    <button 
+                      onClick={() => navigate('/apply')}
+                      className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-purple-500 hover:bg-purple-50 text-left group transition-all duration-200"
+                    >
+                      <div className="flex items-center space-x-4">
+                        <div className="w-12 h-12 rounded-xl bg-purple-600 text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition-transform">
+                          <FileText size={22} />
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-slate-900 text-sm group-hover:text-purple-700 transition-colors">Benefits Application</h3>
+                          <p className="text-xs text-slate-500 mt-0.5">Apply for social welfare programs</p>
+                        </div>
+                      </div>
+                      <ChevronRight size={18} className="text-slate-300 group-hover:text-purple-500 transform group-hover:translate-x-1 transition-all" />
+                    </button>
                   </div>
 
                   <div className="mt-8 flex items-center">
@@ -605,6 +622,12 @@ const Login = () => {
                       >
                         <span className="text-[15px]">{loading ? 'Authenticating...' : 'Access Portal'}</span>
                       </button>
+                    </div>
+
+                    <div className="text-center pt-3">
+                      <p className="text-[11px] text-slate-500 font-medium">
+                        Not registered yet? <button type="button" onClick={() => navigate('/apply')} className="text-[#057a55] font-bold hover:underline">Apply for Benefits</button>
+                      </p>
                     </div>
 
                   </form>
