@@ -1,18 +1,26 @@
 import React, { useState } from 'react';
 import { 
-  User, MapPin, Calendar, Phone, Mail, FileText, Upload, 
+  User, Upload, 
   ChevronRight, ChevronLeft, CheckCircle2, ShieldCheck, 
-  Heart, Users, AlertCircle, Briefcase, GraduationCap
+  Heart, Users, AlertCircle, GraduationCap, Loader2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
+import { db } from './firebase';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { useCloudinaryUpload } from './hooks/useCloudinaryUpload';
+import { APPLICATION_STATUS, COLLECTIONS } from './utils/dataModel';
 
 const Apply = () => {
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
   const [category, setCategory] = useState('');
   const [loading, setLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [submittedReference, setSubmittedReference] = useState('');
+  const [files, setFiles] = useState({});
+  const { uploadMultiple } = useCloudinaryUpload();
 
   // Common Fields
   const [formData, setFormData] = useState({
@@ -57,14 +65,43 @@ const Apply = () => {
     setStep(prev => prev - 1);
   };
 
-  const handleSubmit = (e) => {
+  const handleFileChange = (key, e) => {
+    if (e.target.files[0]) {
+      setFiles(prev => ({ ...prev, [key]: e.target.files[0] }));
+    }
+  };
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
-    // Simulate API call
-    setTimeout(() => {
+    try {
+      const applicationRef = `MSWDO-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
+      let uploadedUrls = {};
+      if (Object.keys(files).length > 0) {
+        uploadedUrls = await uploadMultiple(files, 'mswdo/applications', (pct) => setUploadProgress(pct));
+      }
+
+      const applicationData = {
+        ...formData,
+        applicationRef,
+        category,
+        status: APPLICATION_STATUS.pending,
+        submissionDate: serverTimestamp(),
+        documents: uploadedUrls
+      };
+
+      await addDoc(collection(db, COLLECTIONS.applications), applicationData);
+      
       setLoading(false);
+      setUploadProgress(0);
+      setSubmittedReference(applicationRef);
       setShowSuccess(true);
-    }, 2000);
+    } catch (err) {
+      console.error("Submission failed:", err);
+      alert("Failed to submit application. Please try again.");
+      setLoading(false);
+      setUploadProgress(0);
+    }
   };
 
   const renderBasicInfo = () => (
@@ -122,8 +159,8 @@ const Apply = () => {
           <input required type="tel" name="contactNumber" value={formData.contactNumber} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
         </div>
         <div className="space-y-1.5">
-          <label className="block text-[11px] font-bold text-slate-500 uppercase">Email Address (Optional)</label>
-          <input type="email" name="email" value={formData.email} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+          <label className="block text-[11px] font-bold text-slate-500 uppercase">Email Address <span className="text-red-500">*</span></label>
+          <input type="email" name="email" required value={formData.email} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" placeholder="Required for account creation upon approval" />
         </div>
       </div>
     </div>
@@ -591,56 +628,71 @@ const Apply = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {category === 'senior' ? (
           <>
-            <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group">
+            <label className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group">
+              <input type="file" className="hidden" accept="image/*,.pdf" onChange={(e) => handleFileChange('votersId', e)} />
               <div className="w-12 h-12 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
-                <Upload size={20} />
+                {files.votersId ? <CheckCircle2 size={20} className="text-emerald-500" /> : <Upload size={20} />}
               </div>
               <h4 className="font-bold text-slate-700 text-sm">1 Photocopy of Voter's I.D.</h4>
-              <p className="text-xs text-slate-400 mt-1">Click to browse files</p>
-            </div>
-            <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group">
+              <p className="text-xs text-slate-400 mt-1">{files.votersId ? files.votersId.name : 'Click to browse files'}</p>
+            </label>
+            <label className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group">
+              <input type="file" className="hidden" accept="image/*,.pdf" onChange={(e) => handleFileChange('birthCert', e)} />
               <div className="w-12 h-12 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
-                <Upload size={20} />
+                {files.birthCert ? <CheckCircle2 size={20} className="text-emerald-500" /> : <Upload size={20} />}
               </div>
               <h4 className="font-bold text-slate-700 text-sm">1 Photocopy of Birth Certificate</h4>
-              <p className="text-xs text-slate-400 mt-1">(PSA/NSO)</p>
-            </div>
-            <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group md:col-span-2">
+              <p className="text-xs text-slate-400 mt-1">{files.birthCert ? files.birthCert.name : '(PSA/NSO)'}</p>
+            </label>
+            <label className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group md:col-span-2">
+              <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileChange('selfie', e)} />
               <div className="w-12 h-12 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
-                <Upload size={20} />
+                {files.selfie ? <CheckCircle2 size={20} className="text-emerald-500" /> : <Upload size={20} />}
               </div>
-              <h4 className="font-bold text-slate-700 text-sm">3 pcs 1x1 I.D. Picture (Latest)</h4>
-              <p className="text-xs text-slate-400 mt-1">Upload clear photo</p>
-            </div>
+              <h4 className="font-bold text-slate-700 text-sm">3 pcs 1x1 I.D. Picture (Latest) / Selfie</h4>
+              <p className="text-xs text-slate-400 mt-1">{files.selfie ? files.selfie.name : 'Upload clear photo'}</p>
+            </label>
           </>
         ) : (
           <>
-            <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group">
+            <label className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group">
+              <input type="file" className="hidden" accept="image/*,.pdf" onChange={(e) => handleFileChange('validId', e)} />
               <div className="w-12 h-12 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
-                <Upload size={20} />
+                {files.validId ? <CheckCircle2 size={20} className="text-emerald-500" /> : <Upload size={20} />}
               </div>
               <h4 className="font-bold text-slate-700 text-sm">Valid ID (Any Govt ID)</h4>
-              <p className="text-xs text-slate-400 mt-1">Click to browse files</p>
-            </div>
+              <p className="text-xs text-slate-400 mt-1">{files.validId ? files.validId.name : 'Click to browse files'}</p>
+            </label>
             
-            <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group">
+            <label className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group">
+              <input type="file" className="hidden" accept="image/*,.pdf" onChange={(e) => handleFileChange('barangayClearance', e)} />
               <div className="w-12 h-12 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
-                <Upload size={20} />
+                {files.barangayClearance ? <CheckCircle2 size={20} className="text-emerald-500" /> : <Upload size={20} />}
               </div>
               <h4 className="font-bold text-slate-700 text-sm">Barangay Clearance</h4>
-              <p className="text-xs text-slate-400 mt-1">Click to browse files</p>
-            </div>
+              <p className="text-xs text-slate-400 mt-1">{files.barangayClearance ? files.barangayClearance.name : 'Click to browse files'}</p>
+            </label>
+            
+            <label className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group md:col-span-2">
+              <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileChange('selfie', e)} />
+              <div className="w-12 h-12 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
+                {files.selfie ? <CheckCircle2 size={20} className="text-emerald-500" /> : <Upload size={20} />}
+              </div>
+              <h4 className="font-bold text-slate-700 text-sm">Selfie Verification</h4>
+              <p className="text-xs text-slate-400 mt-1">{files.selfie ? files.selfie.name : 'Upload clear photo'}</p>
+            </label>
           </>
         )}
 
         {category === 'pwd' && (
-          <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group md:col-span-2">
+          <label className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:bg-slate-50 hover:border-blue-400 transition-colors cursor-pointer group md:col-span-2">
+            <input type="file" className="hidden" accept="image/*,.pdf" onChange={(e) => handleFileChange('medicalCert', e)} />
             <div className="w-12 h-12 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
-              <Upload size={20} />
+              {files.medicalCert ? <CheckCircle2 size={20} className="text-emerald-500" /> : <Upload size={20} />}
             </div>
             <h4 className="font-bold text-slate-700 text-sm">Medical Certificate / Assessment</h4>
-            <p className="text-xs text-slate-400 mt-1">Proof of disability signed by a physician</p>
-          </div>
+            <p className="text-xs text-slate-400 mt-1">{files.medicalCert ? files.medicalCert.name : 'Proof of disability signed by a physician'}</p>
+          </label>
         )}
       </div>
 
@@ -681,11 +733,11 @@ const Apply = () => {
               </div>
               <h3 className="text-2xl font-bold text-slate-900 mb-2">Application Submitted!</h3>
               <p className="text-sm text-slate-500 mb-6">
-                Your benefits application has been successfully submitted to the MSWDO. We will review your documents and notify you of the status.
+                Your applicant registration has been successfully submitted to the MSWDO. We will review your documents and notify you of the status.
               </p>
               <div className="bg-slate-50 rounded-xl p-4 mb-8 text-left border border-slate-100">
                 <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Reference Number</p>
-                <p className="text-lg font-mono font-bold text-slate-800">MSWDO-{Math.floor(100000 + Math.random() * 900000)}</p>
+                <p className="text-lg font-mono font-bold text-slate-800">{submittedReference}</p>
                 <p className="text-xs text-slate-500 mt-2">Please save this reference number for tracking purposes.</p>
               </div>
               <button
@@ -707,7 +759,7 @@ const Apply = () => {
               <ShieldCheck size={20} />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-slate-900 leading-tight">MSWDO Benefits Application</h1>
+              <h1 className="text-xl font-bold text-slate-900 leading-tight">MSWDO Applicant Registration</h1>
               <p className="text-xs text-slate-500 font-medium">Municipal Social Welfare Portal</p>
             </div>
           </div>
@@ -833,10 +885,15 @@ const Apply = () => {
               <button
                 type="submit"
                 disabled={loading}
-                className={`px-8 py-3 rounded-xl bg-[#3b66df] text-white font-bold text-sm hover:bg-[#2b4cbf] transition-all shadow-md flex items-center ${loading ? 'opacity-70 cursor-not-allowed' : ''}`}
+                className={`px-8 py-3 rounded-xl bg-[#3b66df] text-white font-bold text-sm hover:bg-[#2b4cbf] transition-all shadow-md flex items-center justify-center min-w-[200px] ${loading ? 'opacity-70 cursor-not-allowed' : ''}`}
               >
                 {step === 3 ? (
-                  loading ? 'Submitting...' : 'Submit Application'
+                  loading ? (
+                    <div className="flex items-center space-x-2">
+                      <Loader2 size={16} className="animate-spin" />
+                      <span>{uploadProgress > 0 ? `Uploading... ${uploadProgress}%` : 'Submitting...'}</span>
+                    </div>
+                  ) : 'Submit Application'
                 ) : (
                   <>
                     Continue <ChevronRight size={16} className="ml-2" />

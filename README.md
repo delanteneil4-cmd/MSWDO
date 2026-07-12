@@ -1,5 +1,10 @@
 # React + Vite
 
+## MSWDO Project Notes
+
+- Firestore data contracts are documented in [`docs/FIRESTORE_SCHEMA.md`](docs/FIRESTORE_SCHEMA.md).
+- Shared collection names, statuses, roles, and category IDs live in `src/utils/dataModel.js`.
+
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
 Currently, two official plugins are available:

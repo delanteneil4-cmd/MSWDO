@@ -4,17 +4,20 @@ import {
   Database, Fingerprint, BarChart2, Gift, FileText, XCircle,
   X, Eye, Trash2, Edit3, Lock, ChevronDown, Check,
   AlertCircle, Loader2, ImagePlus, Shield, ArrowLeft, RefreshCw,
-  Calendar, Clock, Hash, Phone, Mail, CreditCard
+  Calendar, Clock, Hash, Phone, Mail, CreditCard, ClipboardList
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { auth, db } from './firebase';
-import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { auth, db, firebaseConfig } from './firebase';
+import { getAuth, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
+import { initializeApp, getApp } from 'firebase/app';
 import {
-  collection, addDoc, getDocs, doc, updateDoc, deleteDoc,
-  serverTimestamp, query, orderBy, getDoc
+  collection, getDocs, doc, setDoc, updateDoc, deleteDoc,
+  serverTimestamp, getDoc
 } from 'firebase/firestore';
 import { useNavigate } from 'react-router-dom';
 import { useCloudinaryUpload } from './hooks/useCloudinaryUpload';
+import { CATEGORY_OPTIONS, getAssignedCategories, getCategoryDisplayName } from './utils/approvalWorkflow';
+import { COLLECTIONS, MEMBER_STATUS } from './utils/dataModel';
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const ROLES = ['Admin', 'Staff'];
@@ -24,22 +27,36 @@ const POSITION_MAP = {
   Staff: ['Senior Citizen', 'PWD', "Women's", 'Youth'],
 };
 
-const STATUS_OPTIONS = ['Active', 'Inactive'];
+const STATUS_OPTIONS = [MEMBER_STATUS.active, MEMBER_STATUS.inactive];
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
 const ACCEPTED_EXT = '.jpg,.jpeg,.png,.webp';
+
+const createdAtMillis = (user) => user.createdAt?.toMillis?.() || 0;
+
+let secondaryApp;
+let secondaryAuth;
+try {
+  secondaryApp = initializeApp(firebaseConfig, 'UserManagementSecondary');
+} catch {
+  secondaryApp = getApp('UserManagementSecondary');
+}
+secondaryAuth = getAuth(secondaryApp);
 
 // ─── SIDEBAR NAV ITEM ─────────────────────────────────────────────────────────
 const NavItem = ({ icon: Icon, label, active, badge, onClick }) => (
   <button
+    type="button"
     onClick={onClick}
+    disabled={!onClick}
+    title={!onClick ? `${label} is not available yet` : undefined}
     className={`w-full flex items-center justify-between px-4 py-3 rounded-xl mb-1 transition-all ${
       active
-        ? 'bg-blue-600/10 text-blue-500'
-        : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+        ? 'bg-teal-400/10 text-teal-300 border-l-2 border-teal-300'
+        : onClick ? 'text-slate-400 hover:bg-white/5 hover:text-slate-200' : 'text-slate-600/70 cursor-not-allowed'
     }`}
   >
     <div className="flex items-center space-x-3">
-      <Icon size={18} className={active ? 'text-blue-500' : 'text-slate-500'} />
+      <Icon size={18} className={active ? 'text-teal-300' : 'text-slate-500'} />
       <span className="text-sm font-semibold">{label}</span>
     </div>
     {badge && (
@@ -75,7 +92,7 @@ const ImageUploadField = ({ label, value, onChange, error, id }) => {
     try {
       const url = await uploadImage(file, 'mswdo/users', setProgress);
       onChange(url);
-    } catch (err) {
+    } catch {
       setUploadError('Upload failed. Please try again.');
     } finally {
       setUploading(false);
@@ -102,7 +119,7 @@ const ImageUploadField = ({ label, value, onChange, error, id }) => {
 
       {value ? (
         <div className="relative rounded-xl overflow-hidden border-2 border-blue-200 bg-slate-50 group">
-          <img src={value} alt={label} className="w-full h-40 object-cover" />
+          <img src={value} alt={label} loading="lazy" decoding="async" className="w-full h-40 object-cover" />
           <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-3">
             <button type="button" onClick={() => inputRef.current?.click()}
               className="flex items-center gap-1.5 bg-white text-slate-800 text-xs font-bold px-3 py-2 rounded-lg hover:bg-slate-100 transition-colors">
@@ -176,10 +193,12 @@ const EMPTY_FORM = {
   idNumber: '',
   contactNumber: '',
   email: '',
+  tempPassword: '',
   birthDate: '',
   role: '',
   position: '',
-  status: 'Active',
+  assignedCategories: [],
+  status: MEMBER_STATUS.active,
   governmentIdUrl: null,
   selfieUrl: null,
 };
@@ -191,9 +210,11 @@ const EMPTY_ERRORS = {
   idNumber: '',
   contactNumber: '',
   email: '',
+  tempPassword: '',
   birthDate: '',
   role: '',
   position: '',
+  assignedCategories: '',
   governmentIdUrl: '',
   selfieUrl: '',
 };
@@ -257,10 +278,12 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
         idNumber:        editData.idNumber        || '',
         contactNumber:   editData.contactNumber   || '',
         email:           editData.email           || '',
+        tempPassword:    '',
         birthDate:       editData.birthDate       || '',
         role:            editData.role            || '',
         position:        editData.position        || '',
-        status:          editData.status          || 'Active',
+        assignedCategories: getAssignedCategories(editData),
+        status:          editData.status          || MEMBER_STATUS.active,
         governmentIdUrl: editData.governmentIdUrl || null,
         selfieUrl:       editData.selfieUrl       || null,
       } : EMPTY_FORM);
@@ -275,7 +298,7 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
     } else if (form.role === 'Staff' && form.position === 'IT Staff') {
       setForm((f) => ({ ...f, position: '' }));
     }
-  }, [form.role]);
+  }, [form.role, form.position]);
 
   const setField = (key, val) => {
     setForm((f) => ({ ...f, [key]: val }));
@@ -300,9 +323,20 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
     else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
       e.email = 'Enter a valid email address.'; valid = false;
     }
+    if (!isEdit && !form.tempPassword.trim()) {
+      e.tempPassword = 'Temporary password is required.';
+      valid = false;
+    } else if (!isEdit && form.tempPassword.length < 6) {
+      e.tempPassword = 'Password must be at least 6 characters.';
+      valid = false;
+    }
     if (!form.birthDate)           { e.birthDate = 'Birth Date is required.'; valid = false; }
     if (!form.role)                { e.role = 'Role is required.'; valid = false; }
     if (!form.position)            { e.position = 'Position is required.'; valid = false; }
+    if (form.role !== 'applicant' && form.assignedCategories.length === 0) {
+      e.assignedCategories = 'Assign at least one application category.';
+      valid = false;
+    }
     if (!form.governmentIdUrl)     { e.governmentIdUrl = 'Government ID upload is required.'; valid = false; }
     if (!form.selfieUrl)           { e.selfieUrl = 'Selfie upload is required.'; valid = false; }
 
@@ -319,6 +353,9 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
       onClose();
     } catch (err) {
       console.error('Save error:', err);
+      alert(err.code === 'auth/email-already-in-use'
+        ? 'An account already exists with this email address.'
+        : `Failed to save user: ${err.message || 'Please try again.'}`);
     } finally {
       setSubmitting(false);
     }
@@ -328,6 +365,14 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
 
   const positionOptions = POSITION_MAP[form.role] || [];
   const isAdminRole = form.role === 'Admin';
+  const toggleCategory = (categoryId) => {
+    setField(
+      'assignedCategories',
+      form.assignedCategories.includes(categoryId)
+        ? form.assignedCategories.filter((id) => id !== categoryId)
+        : [...form.assignedCategories, categoryId]
+    );
+  };
 
   return (
     <AnimatePresence>
@@ -454,6 +499,21 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
                   <FormInput id="email" label="Email Address" type="email" value={form.email}
                     onChange={(e) => setField('email', e.target.value)}
                     placeholder="e.g. juan@mswdo.gov.ph" error={errors.email} icon={Mail} />
+                  {!isEdit && (
+                    <div className="mt-4">
+                      <FormInput
+                        id="tempPassword"
+                        label="Temporary Password"
+                        type="password"
+                        value={form.tempPassword}
+                        onChange={(e) => setField('tempPassword', e.target.value)}
+                        placeholder="Minimum 6 characters"
+                        error={errors.tempPassword}
+                        icon={Lock}
+                        hint="Used for the new account's first login. Do not store this password elsewhere."
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {/* ── ROLE & POSITION ── */}
@@ -537,6 +597,42 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
 
                 {/* ── DOCUMENT VERIFICATION ── */}
                 <div className="mb-6">
+                  <SectionDivider label="Application Category Access" />
+                  <div className="grid grid-cols-2 gap-3">
+                    {CATEGORY_OPTIONS.map(({ id, label }) => {
+                      const checked = form.assignedCategories.includes(id);
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => toggleCategory(id)}
+                          className={`flex items-center gap-3 rounded-xl border-2 px-4 py-3 text-left transition-all ${
+                            checked
+                              ? 'border-blue-500 bg-blue-50 text-blue-700'
+                              : 'border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50/40'
+                          }`}
+                        >
+                          <span className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
+                            checked ? 'bg-blue-600 border-blue-600 text-white' : 'border-slate-300 bg-white'
+                          }`}>
+                            {checked && <Check size={11} />}
+                          </span>
+                          <span className="text-xs font-bold">{label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {errors.assignedCategories && (
+                    <p className="text-red-500 text-[11px] font-semibold mt-1.5 flex items-center gap-1">
+                      <AlertCircle size={11} /> {errors.assignedCategories}
+                    </p>
+                  )}
+                  <p className="text-[11px] text-slate-400 font-medium mt-2">
+                    This controls which applications the account can view, approve, or reject.
+                  </p>
+                </div>
+
+                <div className="mb-6">
                   <SectionDivider label="Document Verification" />
                   <div className="grid grid-cols-2 gap-4">
                     <ImageUploadField id="govId" label="Government ID"
@@ -563,11 +659,11 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
                         <button key={s} type="button" onClick={() => setField('status', s)}
                           className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold border-2 transition-all ${
                             form.status === s
-                              ? s === 'Active' ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                              ? s === MEMBER_STATUS.active ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
                                 : 'border-red-400 bg-red-50 text-red-700'
                               : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
                           }`}>
-                          <span className={`w-2 h-2 rounded-full ${s === 'Active' ? 'bg-emerald-500' : 'bg-red-400'}`} />
+                          <span className={`w-2 h-2 rounded-full ${s === MEMBER_STATUS.active ? 'bg-emerald-500' : 'bg-red-400'}`} />
                           {s}
                         </button>
                       ))}
@@ -606,6 +702,7 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
 const ViewDetailsModal = ({ open, onClose, user }) => {
   if (!open || !user) return null;
   const fullName = [user.firstName, user.middleInitial ? user.middleInitial + '.' : '', user.lastName].filter(Boolean).join(' ');
+  const categoryLabels = getAssignedCategories(user).map(getCategoryDisplayName).join(', ');
 
   const InfoItem = ({ label, value, className = '' }) => (
     <div>
@@ -672,7 +769,10 @@ const ViewDetailsModal = ({ open, onClose, user }) => {
                   <InfoItem label="Role" value={user.role} />
                   <InfoItem label="Position" value={user.position} />
                   <InfoItem label="Status" value={user.status}
-                    className={user.status === 'Active' ? 'text-emerald-600' : 'text-red-500'} />
+                    className={user.status === MEMBER_STATUS.active ? 'text-emerald-600' : 'text-red-500'} />
+                </div>
+                <div className="mt-4">
+                  <InfoItem label="Application Category Access" value={categoryLabels} />
                 </div>
               </div>
 
@@ -706,7 +806,7 @@ const ViewDetailsModal = ({ open, onClose, user }) => {
                       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">{label}</p>
                       {url ? (
                         <a href={url} target="_blank" rel="noopener noreferrer" className="block group">
-                          <img src={url} alt={label} className="w-full h-32 object-cover rounded-xl border border-slate-200 group-hover:opacity-80 transition-opacity" />
+                          <img src={url} alt={label} loading="lazy" decoding="async" className="w-full h-32 object-cover rounded-xl border border-slate-200 group-hover:opacity-80 transition-opacity" />
                           <p className="text-[10px] text-blue-500 font-semibold mt-1 text-center">Click to view full size ↗</p>
                         </a>
                       ) : (
@@ -783,9 +883,9 @@ const RoleBadge = ({ role }) => {
 
 const StatusBadge = ({ status }) => (
   <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
-    status === 'Active' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-slate-100 text-slate-500 border-slate-200'
+    status === MEMBER_STATUS.active ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-slate-100 text-slate-500 border-slate-200'
   }`}>
-    <span className={`w-1.5 h-1.5 rounded-full ${status === 'Active' ? 'bg-emerald-500' : 'bg-slate-400'}`} />
+    <span className={`w-1.5 h-1.5 rounded-full ${status === MEMBER_STATUS.active ? 'bg-emerald-500' : 'bg-slate-400'}`} />
     {status}
   </span>
 );
@@ -804,7 +904,6 @@ const StatCard = ({ label, count, color }) => {
 // ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 const UserManagement = () => {
   const navigate = useNavigate();
-  const [authUser, setAuthUser]     = useState(null);
   const [userName, setUserName]     = useState('Admin');
   const [userInitials, setUserInitials] = useState('A');
   const [userRole, setUserRole]     = useState('');
@@ -824,9 +923,8 @@ const UserManagement = () => {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) { navigate('/'); return; }
-      setAuthUser(user);
       try {
-        const snap = await getDoc(doc(db, 'users', user.uid));
+        const snap = await getDoc(doc(db, COLLECTIONS.users, user.uid));
         if (snap.exists()) {
           const d = snap.data();
           setUserRole(d.role || 'Admin');
@@ -843,9 +941,12 @@ const UserManagement = () => {
   const fetchUsers = useCallback(async () => {
     setLoading(true);
     try {
-      const q = query(collection(db, 'users'), orderBy('createdAt', 'desc'));
-      const snap = await getDocs(q);
-      setUsers(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      const snap = await getDocs(collection(db, COLLECTIONS.users));
+      setUsers(
+        snap.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .sort((a, b) => createdAtMillis(b) - createdAtMillis(a))
+      );
     } catch (e) {
       console.error('Fetch users:', e);
     } finally {
@@ -868,15 +969,27 @@ const UserManagement = () => {
       birthDate:       formData.birthDate,
       role:            formData.role,
       position:        formData.position,
-      status:          formData.status || 'Active',
+      assignedCategories: formData.assignedCategories,
+      status:          formData.status || MEMBER_STATUS.active,
       governmentIdUrl: formData.governmentIdUrl || '',
       selfieUrl:       formData.selfieUrl || '',
       updatedAt:       now,
     };
     if (id) {
-      await updateDoc(doc(db, 'users', id), payload);
+      await updateDoc(doc(db, COLLECTIONS.users, id), payload);
     } else {
-      await addDoc(collection(db, 'users'), { ...payload, createdAt: now });
+      const credential = await createUserWithEmailAndPassword(
+        secondaryAuth,
+        payload.email,
+        formData.tempPassword
+      );
+
+      await setDoc(doc(db, COLLECTIONS.users, credential.user.uid), {
+        ...payload,
+        authUid: credential.user.uid,
+        requiresPasswordChange: true,
+        createdAt: now,
+      });
     }
     await fetchUsers();
   };
@@ -886,11 +999,20 @@ const UserManagement = () => {
     if (!deleteUser) return;
     setDeleteLoading(true);
     try {
-      await deleteDoc(doc(db, 'users', deleteUser.id));
+      await deleteDoc(doc(db, COLLECTIONS.users, deleteUser.id));
       setDeleteUser(null);
       await fetchUsers();
     } catch (e) { console.error(e); }
     finally { setDeleteLoading(false); }
+  };
+
+  // Toggle Active / Inactive
+  const handleToggleLock = async (user) => {
+    const newStatus = user.status === MEMBER_STATUS.active ? MEMBER_STATUS.inactive : MEMBER_STATUS.active;
+    try {
+      await updateDoc(doc(db, COLLECTIONS.users, user.id), { status: newStatus, updatedAt: serverTimestamp() });
+      setUsers(prev => prev.map(u => u.id === user.id ? { ...u, status: newStatus } : u));
+    } catch (e) { console.error('Toggle lock error:', e); }
   };
 
   const handleLogout = async () => { await signOut(auth); navigate('/'); };
@@ -919,7 +1041,7 @@ const UserManagement = () => {
     <div className="flex h-screen bg-slate-50 overflow-hidden font-sans">
 
       {/* ── SIDEBAR ── */}
-      <div className="w-64 bg-[#0a1128] flex flex-col shadow-xl z-20 shrink-0">
+      <div className="w-64 bg-[#102a43] flex flex-col shadow-xl z-20 shrink-0">
         <div className="p-6 flex items-center space-x-3">
           <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-600/20">
             <ShieldIcon />
@@ -933,18 +1055,19 @@ const UserManagement = () => {
         <div className="px-6 py-2 flex-1 overflow-y-auto">
           <p className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-4">Navigation</p>
           <div className="space-y-0.5">
-            <NavItem icon={Menu}      label="Dashboard"       onClick={() => navigate('/dashboard')} />
-            <NavItem icon={Users}     label="Membership" />
-            <NavItem icon={Gift}      label="Benefits" />
-            <NavItem icon={FileText}  label="Record Tracking" />
-            <NavItem icon={XCircle}   label="Termination" />
-            <NavItem icon={Bell}      label="Announcements" />
-            <NavItem icon={BarChart2} label="Reports" />
+            <NavItem icon={Menu}         label="Dashboard"       onClick={() => navigate('/dashboard')} />
+            <NavItem icon={Users}        label="Membership" onClick={() => navigate('/membership')} />
+            <NavItem icon={ClipboardList} label="Applications"   onClick={() => navigate('/applications')} />
+            <NavItem icon={Gift}         label="Benefits" onClick={() => navigate('/benefits')} />
+            <NavItem icon={FileText}     label="Record Tracking" onClick={() => navigate('/audit')} />
+            <NavItem icon={XCircle}      label="Termination" onClick={() => navigate('/termination')} />
+            <NavItem icon={Bell}         label="Announcements" onClick={() => navigate('/announcements')} />
+            <NavItem icon={BarChart2}    label="Reports" />
           </div>
           <div className="mt-8 mb-4 h-px w-full bg-white/5" />
           <div className="space-y-0.5">
             <NavItem icon={Database}    label="CMS"                badge="SA" />
-            <NavItem icon={Fingerprint} label="Audit & Monitoring" badge="SA" />
+            <NavItem icon={Fingerprint} label="Audit & Monitoring" badge="SA" onClick={() => navigate('/audit')} />
             <NavItem icon={UserPlus}    label="User Management"    badge="SA" active onClick={() => navigate('/user-management')} />
             <NavItem icon={Settings}    label="Settings"           badge="SA" />
           </div>
@@ -996,7 +1119,7 @@ const UserManagement = () => {
         </header>
 
         {/* Content */}
-        <div className="flex-1 overflow-auto p-8">
+        <div className="flex-1 overflow-auto p-4 sm:p-8">
 
           {/* Title + CTA */}
           <div className="flex items-start justify-between mb-6">
@@ -1087,7 +1210,7 @@ const UserManagement = () => {
                           </td>
                           <td className="px-5 py-4"><RoleBadge role={u.role} /></td>
                           <td className="px-5 py-4"><span className="text-sm font-semibold text-slate-600">{u.position || '—'}</span></td>
-                          <td className="px-5 py-4"><StatusBadge status={u.status || 'Active'} /></td>
+                          <td className="px-5 py-4"><StatusBadge status={u.status || MEMBER_STATUS.active} /></td>
                           <td className="px-5 py-4"><span className="text-xs font-semibold text-slate-500 whitespace-nowrap">{fmtDate(u.createdAt)}</span></td>
                           <td className="px-5 py-4">
                             <div className="flex items-center gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
@@ -1099,8 +1222,13 @@ const UserManagement = () => {
                                 className="w-8 h-8 rounded-lg hover:bg-amber-50 text-slate-400 hover:text-amber-600 flex items-center justify-center transition-colors">
                                 <Edit3 size={14} />
                               </button>
-                              <button id={`lock-${u.id}`} title="Lock account"
-                                className="w-8 h-8 rounded-lg hover:bg-orange-50 text-slate-400 hover:text-orange-500 flex items-center justify-center transition-colors">
+                              <button id={`lock-${u.id}`} onClick={() => handleToggleLock(u)}
+                                title={u.status === MEMBER_STATUS.active ? 'Deactivate account' : 'Activate account'}
+                                className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+                                  u.status === MEMBER_STATUS.active
+                                    ? 'hover:bg-orange-50 text-slate-400 hover:text-orange-500'
+                                    : 'hover:bg-emerald-50 text-slate-400 hover:text-emerald-500'
+                                }`}>
                                 <Lock size={14} />
                               </button>
                               <button id={`delete-${u.id}`} onClick={() => setDeleteUser(u)} title="Delete"

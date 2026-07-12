@@ -1,0 +1,248 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function currentUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function currentUserExists() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function currentUser() {
+      return currentUserDoc().data;
+    }
+
+    function isSuperAdmin() {
+      return currentUserExists()
+        && currentUser().role in ['super', 'super admin', 'Super Admin'];
+    }
+
+    function isStaff() {
+      return currentUserExists()
+        && (
+          currentUser().role in ['Admin', 'admin', 'Staff', 'staff']
+          || isSuperAdmin()
+        );
+    }
+
+    function isApplicant() {
+      return currentUserExists()
+        && (
+          currentUser().role in ['applicant', 'Applicant']
+          || currentUser().memberType == 'beneficiary'
+        );
+    }
+
+    function legacyPositionCategories() {
+      return currentUser().position == 'Senior Citizen' ? ['senior']
+        : currentUser().position == 'PWD' ? ['pwd']
+        : currentUser().position == "Women's" ? ['women']
+        : currentUser().position == 'Women' ? ['women']
+        : currentUser().position == "Women's Welfare" ? ['women']
+        : currentUser().position == 'Youth' ? ['youth']
+        : currentUser().position == 'Youth Welfare' ? ['youth']
+        : [];
+    }
+
+    function assignedCategories() {
+      return currentUser().assignedCategories is list
+        ? currentUser().assignedCategories
+        : legacyPositionCategories();
+    }
+
+    function validCategory(category) {
+      return category in ['senior', 'pwd', 'women', 'youth'];
+    }
+
+    function canAccessCategory(category) {
+      return currentUserExists()
+        && validCategory(category)
+        && isStaff()
+        && (isSuperAdmin() || category in assignedCategories());
+    }
+
+    function applicantCategory() {
+      return currentUser().memberCategory is string
+        ? currentUser().memberCategory
+        : currentUser().applicationData is map
+          ? currentUser().applicationData.category
+          : '';
+    }
+
+    function canApplicantAccessCategory(category) {
+      return isApplicant()
+        && validCategory(category)
+        && applicantCategory() == category;
+    }
+
+    function validClaimStatus(status) {
+      return status in ['Pending', 'Under Review', 'Approved', 'Processed', 'Rejected', 'Cancelled'];
+    }
+
+    function applicantCancelClaimOnly() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'status',
+        'cancelReason',
+        'cancelledAt',
+        'cancelledBy',
+        'timeline'
+      ]);
+    }
+
+    function isApplicantMemberRecord(data) {
+      return data.role == 'applicant'
+        && data.memberType == 'beneficiary'
+        && validCategory(data.memberCategory);
+    }
+
+    function canCreateUserRecord(data) {
+      return isSuperAdmin()
+        || (
+          isStaff()
+          && isApplicantMemberRecord(data)
+          && canAccessCategory(data.memberCategory)
+        );
+    }
+
+    function selfPasswordChangeOnly(userId) {
+      return signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['requiresPasswordChange']);
+    }
+
+    function staffMemberStatusUpdateOnly() {
+      return isStaff()
+        && isApplicantMemberRecord(resource.data)
+        && canAccessCategory(resource.data.memberCategory)
+        && request.resource.data.memberCategory == resource.data.memberCategory
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'updatedAt', 'terminatedAt', 'terminatedBy',
+          'terminationReason', 'terminationId', 'restoredAt', 'restoredBy',
+          'restoreReason'
+        ]);
+    }
+
+    match /applications/{applicationId} {
+      allow create: if validCategory(request.resource.data.category)
+        && request.resource.data.status == 'Pending';
+      allow read: if canAccessCategory(resource.data.category);
+      allow update: if canAccessCategory(resource.data.category)
+        && request.resource.data.category == resource.data.category;
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && (
+        request.auth.uid == userId
+        || isStaff()
+      );
+      allow create: if signedIn()
+        && canCreateUserRecord(request.resource.data)
+        && (
+          isSuperAdmin()
+          || isApplicantMemberRecord(request.resource.data)
+        );
+      allow update: if isSuperAdmin()
+        || selfPasswordChangeOnly(userId)
+        || staffMemberStatusUpdateOnly();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /terminations/{terminationId} {
+      allow read: if canAccessCategory(resource.data.categoryId);
+      allow create: if canAccessCategory(request.resource.data.categoryId)
+        && request.resource.data.memberId is string
+        && request.resource.data.status in ['Terminated', 'Restored'];
+      allow update: if canAccessCategory(resource.data.categoryId)
+        && request.resource.data.categoryId == resource.data.categoryId;
+      allow delete: if isSuperAdmin();
+    }
+
+    match /benefits/{benefitId} {
+      allow read: if canAccessCategory(resource.data.category)
+        || (
+          canApplicantAccessCategory(resource.data.category)
+          && resource.data.status == 'Active'
+        );
+      allow create: if canAccessCategory(request.resource.data.category)
+        && request.resource.data.status in ['Active', 'Inactive'];
+      allow update: if canAccessCategory(resource.data.category)
+        && request.resource.data.category == resource.data.category
+        && request.resource.data.status in ['Active', 'Inactive'];
+      allow delete: if isSuperAdmin();
+    }
+
+    match /claims/{claimId} {
+      allow read: if canAccessCategory(resource.data.category)
+        || (isApplicant() && resource.data.memberId == request.auth.uid);
+      allow create: if (
+          canAccessCategory(request.resource.data.category)
+          && validClaimStatus(request.resource.data.status)
+        ) || (
+          canApplicantAccessCategory(request.resource.data.category)
+          && request.resource.data.memberId == request.auth.uid
+          && request.resource.data.status == 'Pending'
+        );
+      allow update: if (
+          canAccessCategory(resource.data.category)
+          && request.resource.data.category == resource.data.category
+          && request.resource.data.memberId == resource.data.memberId
+          && request.resource.data.benefitId == resource.data.benefitId
+          && validClaimStatus(request.resource.data.status)
+        ) || (
+          isApplicant()
+          && resource.data.memberId == request.auth.uid
+          && resource.data.status == 'Pending'
+          && applicantCancelClaimOnly()
+          && request.resource.data.memberId == resource.data.memberId
+          && request.resource.data.category == resource.data.category
+          && request.resource.data.status == 'Cancelled'
+        );
+      allow delete: if isSuperAdmin();
+    }
+
+    match /activity_logs/{logId} {
+      allow read, create: if isStaff();
+      allow update, delete: if false;
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if isStaff()
+        || (isApplicant()
+          && resource.data.published == true
+          && applicantCategory() in resource.data.targetCategories);
+      allow create: if isStaff()
+        && request.resource.data.title is string
+        && request.resource.data.body is string
+        && request.resource.data.targetCategories is list
+        && request.resource.data.targetCategories.size() > 0
+        && request.resource.data.targetCategories.hasOnly(assignedCategories());
+      allow update: if isStaff()
+        && request.resource.data.targetCategories is list
+        && request.resource.data.targetCategories.size() > 0
+        && request.resource.data.targetCategories.hasOnly(assignedCategories());
+      allow delete: if isSuperAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isApplicant()
+        && resource.data.memberId == request.auth.uid;
+      allow update: if isApplicant()
+        && resource.data.memberId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt']);
+      allow create: if isStaff();
+      allow delete: if isStaff();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

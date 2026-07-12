@@ -1,17 +1,19 @@
 import React, { useState } from 'react';
 import { 
-  Eye, EyeOff, Lock, User, ArrowRight, ShieldCheck, Shield, HelpCircle, 
-  Users, ChevronDown, Mail, MapPin, Gift, FileText, ChevronRight, UserPlus,
+  Eye, EyeOff, Lock, ShieldCheck, Shield,
+  Users, Mail, MapPin, Gift, FileText, ChevronRight, UserPlus,
   ChevronLeft, CheckCircle2, Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { auth, db } from './firebase';
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { useNavigate } from 'react-router-dom';
+import { signInWithEmailAndPassword, updatePassword } from 'firebase/auth';
+import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { COLLECTIONS, isBeneficiaryUser } from './utils/dataModel';
 
 const Login = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   
   // 'selection' | 'admin' | 'beneficiary'
   const [viewMode, setViewMode] = useState('selection'); 
@@ -19,29 +21,14 @@ const Login = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(location.state?.message || '');
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [successData, setSuccessData] = useState(null);
-
-  const adminRoles = [
-    "Department Head",
-    "Department IT Staff",
-    "Senior Citizen Focal",
-    "Person with Disability Focal",
-    "Womans Focal",
-    "Youth Focal"
-  ];
-
-  const beneficiaryRoles = [
-    "Senior Citizen",
-    "Person With Disability",
-    "Women's",
-    "Youth"
-  ];
-
-  const currentRoles = viewMode === 'admin' ? adminRoles : beneficiaryRoles;
+  const [showPasswordChangeModal, setShowPasswordChangeModal] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [pendingUser, setPendingUser] = useState(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -56,20 +43,26 @@ const Login = () => {
         const user = userCredential.user;
         
         // Connect to Firestore and get user document
-        const userDocRef = doc(db, 'users', user.uid);
+        const userDocRef = doc(db, COLLECTIONS.users, user.uid);
         const userDocSnap = await getDoc(userDocRef);
 
         if (userDocSnap.exists()) {
           const userData = userDocSnap.data();
-          console.log('Firestore User Data:', userData);
+          const roleName = String(userData.role || '').toLowerCase();
           
-          if (adminType === 'admin' && userData.role !== 'admin') {
+          if (adminType === 'admin' && !['admin', 'staff'].includes(roleName)) {
             await auth.signOut();
             throw new Error("Access denied. Admin credentials required.");
           }
-          if (adminType === 'super' && userData.role !== 'super') {
+          if (adminType === 'super' && !roleName.includes('super')) {
             await auth.signOut();
             throw new Error("Access denied. Super Admin credentials required.");
+          }
+          if (userData.requiresPasswordChange) {
+            setPendingUser({ user, userData });
+            setShowPasswordChangeModal(true);
+            setLoading(false);
+            return;
           }
           
           setSuccessData({ email: userData.email, role: userData.role || 'Staff Member' });
@@ -81,15 +74,21 @@ const Login = () => {
           
           if (adminDocSnap.exists()) {
             const adminData = adminDocSnap.data();
-            console.log('Firestore Admin Data:', adminData);
+            const roleName = String(adminData.role || '').toLowerCase();
             
-            if (adminType === 'admin' && adminData.role !== 'admin') {
+            if (adminType === 'admin' && !['admin', 'staff'].includes(roleName)) {
               await auth.signOut();
               throw new Error("Access denied. Admin credentials required.");
             }
-            if (adminType === 'super' && adminData.role !== 'super') {
+            if (adminType === 'super' && !roleName.includes('super')) {
               await auth.signOut();
               throw new Error("Access denied. Super Admin credentials required.");
+            }
+            if (adminData.requiresPasswordChange) {
+              setPendingUser({ user, userData: adminData });
+              setShowPasswordChangeModal(true);
+              setLoading(false);
+              return;
             }
             
             setSuccessData({ email: adminData.email || email, role: adminData.role || 'Administrator' });
@@ -100,18 +99,29 @@ const Login = () => {
           }
         }
       } else {
-        // Beneficiary logic
+        // Beneficiary logic — login with registered email address
+        const formattedEmail = email.trim().toLowerCase();
+        if (!formattedEmail.includes('@')) {
+          throw new Error('Please enter your registered email address.');
+        }
+
         const userCredential = await signInWithEmailAndPassword(auth, formattedEmail, password);
         const user = userCredential.user;
         
-        const userDocRef = doc(db, 'users', user.uid);
+        const userDocRef = doc(db, COLLECTIONS.users, user.uid);
         const userDocSnap = await getDoc(userDocRef);
         
         if (userDocSnap.exists()) {
           const userData = userDocSnap.data();
-          if (userData.role !== 'applicant') {
+          if (!isBeneficiaryUser(userData)) {
             await auth.signOut();
             throw new Error("Access denied. Applicant credentials required.");
+          }
+          if (userData.requiresPasswordChange) {
+            setPendingUser({ user, userData });
+            setShowPasswordChangeModal(true);
+            setLoading(false);
+            return;
           }
         } else {
           // If user document doesn't exist, we might still want to deny them
@@ -131,46 +141,9 @@ const Login = () => {
     }
   };
 
-  const createMockAccounts = async () => {
-    setLoading(true);
-    try {
-      const accounts = [
-        { email: 'admin-01@mswdo.gov.ph', password: 'password123', role: 'admin' },
-        { email: 'super-01@mswdo.gov.ph', password: 'password123', role: 'super' },
-        { email: 'Ap-01@mswdo.gov.ph', password: 'password123', role: 'applicant' }
-      ];
-
-      for (const acc of accounts) {
-        try {
-          // Creates the user, implicitly signs them in, thus generating the user.uid safely.
-          const cred = await createUserWithEmailAndPassword(auth, acc.email, acc.password);
-          await setDoc(doc(db, 'users', cred.user.uid), {
-            email: acc.email,
-            role: acc.role,
-            createdAt: new Date().toISOString()
-          });
-          console.log(`Created: ${acc.email} | Role: ${acc.role}`);
-        } catch (err) {
-          console.warn(`Failed for ${acc.email}. Perhaps it already exists:`, err.message);
-        }
-      }
-      alert("Mock accounts created/verified! You can now sign in using them.");
-      
-      // We automatically log out after creation so the explicit testing flow isn't interrupted 
-      await auth.signOut();
-      
-    } catch (err) {
-      console.error(err);
-      alert("Error: " + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const resetForm = () => {
     setEmail('');
     setPassword('');
-    setRole('');
     setError('');
     setShowPassword(false);
   };
@@ -180,11 +153,45 @@ const Login = () => {
     resetForm();
   };
 
+  const handlePasswordChange = async (e) => {
+    e.preventDefault();
+    if (newPassword !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    if (newPassword.length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
+    
+    setLoading(true);
+    setError('');
+    try {
+      await updatePassword(pendingUser.user, newPassword);
+      await updateDoc(doc(db, COLLECTIONS.users, pendingUser.user.uid), {
+        requiresPasswordChange: false
+      });
+      setShowPasswordChangeModal(false);
+      setSuccessData({
+        email: pendingUser.user.email,
+        role: isBeneficiaryUser(pendingUser.userData)
+          ? 'Registered Applicant'
+          : pendingUser.userData?.role || 'Staff Member',
+      });
+      setShowSuccessModal(true);
+    } catch (err) {
+      console.error("Password change error:", err);
+      setError("Failed to update password: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="flex min-h-screen w-full bg-[#f8fafc] font-sans">
       
       {/* LEFT PANEL */}
-      <div className="hidden lg:flex flex-col relative w-[45%] bg-[#0a1930] overflow-hidden">
+      <div className="hidden lg:flex flex-col relative w-[45%] bg-[#102a43] overflow-hidden">
         {/* Abstract Background Elements */}
         <div 
           className="absolute inset-0 z-0 opacity-20"
@@ -353,7 +360,7 @@ const Login = () => {
                           <FileText size={22} />
                         </div>
                         <div>
-                          <h3 className="font-bold text-slate-900 text-sm group-hover:text-purple-700 transition-colors">Benefits Application</h3>
+                          <h3 className="font-bold text-slate-900 text-sm group-hover:text-purple-700 transition-colors">Applicant Registration</h3>
                           <p className="text-xs text-slate-500 mt-0.5">Apply for social welfare programs</p>
                         </div>
                       </div>
@@ -561,7 +568,7 @@ const Login = () => {
                     <div>
                       <h3 className="text-[13px] font-bold text-emerald-900">Applicant Portal Access</h3>
                       <p className="text-[11px] font-medium text-emerald-700/90 mt-1 leading-relaxed">
-                        Use your MSWDO-issued Applicant ID and the password provided by your barangay officer.
+                        Use the email address from your application and the temporary password sent upon approval. You will be required to change your password on first login.
                       </p>
                     </div>
                   </div>
@@ -570,18 +577,18 @@ const Login = () => {
                     
                     <div className="space-y-1.5 text-left">
                       <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                        APPLICANT ID
+                        EMAIL ADDRESS
                       </label>
                       <div className="relative group">
                         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                          <UserPlus size={16} />
+                          <Mail size={16} />
                         </div>
                         <input
-                          type="text"
+                          type="email"
                           required
                           value={email}
                           onChange={(e) => setEmail(e.target.value)}
-                          placeholder="e.g. SC-2024-001"
+                          placeholder="your.email@example.com"
                           className="w-full rounded-xl py-3 pl-10 pr-3 text-slate-900 border border-slate-200 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:border-transparent text-sm font-medium focus:ring-[#057a55]/20"
                         />
                       </div>
@@ -626,7 +633,7 @@ const Login = () => {
 
                     <div className="text-center pt-3">
                       <p className="text-[11px] text-slate-500 font-medium">
-                        Not registered yet? <button type="button" onClick={() => navigate('/apply')} className="text-[#057a55] font-bold hover:underline">Apply for Benefits</button>
+                        Not registered yet? <button type="button" onClick={() => navigate('/apply')} className="text-[#057a55] font-bold hover:underline">Applicant Registration</button>
                       </p>
                     </div>
 
@@ -643,21 +650,12 @@ const Login = () => {
             <p className="text-[10px] text-slate-400/80 font-medium">
               Republic of the Philippines · Municipal Government · © 2026
             </p>
-            <div className="pt-4">
-              <button 
-                onClick={createMockAccounts}
-                disabled={loading}
-                className="px-4 py-2 bg-slate-100/50 hover:bg-slate-200 text-slate-500 rounded-lg text-[10px] font-bold tracking-widest uppercase transition-colors active:scale-95"
-              >
-                Initialize Demo Accounts
-              </button>
-            </div>
           </div>
 
         </div>
       </div>
 
-      {/* SUCCESS MODAL OVERLAY */}
+      {/* Success Modal OVERLAY */}
       <AnimatePresence>
         {showSuccessModal && (
           <motion.div
@@ -710,6 +708,87 @@ const Login = () => {
               <p className="text-[10px] text-slate-400 mt-4 font-bold uppercase tracking-widest animate-pulse">
                 Redirecting to dashboard...
               </p>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Password Change Modal */}
+      <AnimatePresence>
+        {showPasswordChangeModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-[24px] shadow-2xl w-full max-w-sm p-8"
+            >
+              <div className="w-16 h-16 bg-orange-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Lock size={32} className="text-orange-500" />
+              </div>
+              <h3 className="text-xl font-bold text-slate-800 mb-2 text-center">Update Password</h3>
+              <p className="text-sm text-slate-500 mb-6 text-center">
+                For your security, please update your temporary password before accessing the system.
+              </p>
+              
+              {error && (
+                <div className="mb-4 p-3 rounded-lg bg-red-50 text-red-600 text-[11px] font-semibold border border-red-100 flex items-start gap-2">
+                  <Shield size={14} className="mt-0.5 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              <form onSubmit={handlePasswordChange} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">New Password</label>
+                  <div className="relative">
+                    <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="w-full pl-10 pr-10 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm font-medium"
+                      placeholder="••••••••"
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </div>
+                
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Confirm Password</label>
+                  <div className="relative">
+                    <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      className="w-full pl-10 pr-10 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm font-medium"
+                      placeholder="••••••••"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className={`w-full mt-4 py-3 bg-[#057a55] text-white rounded-xl font-bold text-sm hover:bg-[#046c4b] transition-all shadow-md flex items-center justify-center gap-2 ${loading ? 'opacity-70 cursor-not-allowed' : 'active:scale-95'}`}
+                >
+                  {loading ? 'Updating...' : 'Update Password & Continue'}
+                </button>
+              </form>
             </motion.div>
           </motion.div>
         )}
