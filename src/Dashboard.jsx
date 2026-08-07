@@ -9,7 +9,7 @@ import { auth, db } from './firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc, collection, query, orderBy, limit, getDocs, where } from 'firebase/firestore';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { getAssignedCategories } from './utils/approvalWorkflow';
+import { getAssignedCategories, isSuperAdminUser } from './utils/approvalWorkflow';
 import {
   APPLICATION_STATUS,
   COLLECTIONS,
@@ -156,18 +156,30 @@ const Dashboard = () => {
   }, []);
 
   React.useEffect(() => {
-    const fetchActivities = async () => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (!user) return;
       try {
-        const q = query(collection(db, COLLECTIONS.activityLogs), orderBy('timestamp', 'desc'), limit(5));
-        const snap = await getDocs(q);
-        setActivities(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        const profileSnap = await getDoc(doc(db, COLLECTIONS.users, user.uid));
+        const profileData = profileSnap.exists() ? profileSnap.data() : {};
+        const categories = getAssignedCategories(profileData);
+        const snapshots = isSuperAdminUser(profileData)
+          ? [await getDocs(query(collection(db, COLLECTIONS.activityLogs), orderBy('timestamp', 'desc'), limit(5)))]
+          : await Promise.all(
+            categories.map((categoryId) => getDocs(
+              query(collection(db, COLLECTIONS.activityLogs), where('categoryId', '==', categoryId))
+            ))
+          );
+        const activityRows = snapshots.flatMap((snapshot) => snapshot.docs.map((item) => ({ id: item.id, ...item.data() })))
+          .sort((a, b) => (b.timestamp?.toMillis?.() || 0) - (a.timestamp?.toMillis?.() || 0))
+          .slice(0, 5);
+        setActivities(activityRows);
       } catch (e) {
         console.error('Error fetching activity logs:', e);
       } finally {
         setActivitiesLoading(false);
       }
-    };
-    fetchActivities();
+    });
+    return () => unsubscribe();
   }, []);
 
   React.useEffect(() => {
@@ -269,7 +281,7 @@ const Dashboard = () => {
             <NavItem icon={UserX} label="Termination" onClick={() => navigate('/termination')} />
             <NavItem icon={FileText} label="Record Tracking" onClick={() => navigate('/audit')} />
             <NavItem icon={Bell} label="Announcements" onClick={() => navigate('/announcements')} />
-            <NavItem icon={BarChart2} label="Reports" />
+            <NavItem icon={BarChart2} label="Reports" onClick={() => navigate('/reports')} />
           </div>
           
           {isSuper && (

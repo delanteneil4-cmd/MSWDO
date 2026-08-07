@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { doc, onSnapshot } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { COLLECTIONS, isBeneficiaryUser } from './utils/dataModel';
 
@@ -27,41 +27,63 @@ const ProtectedRoute = ({ allowed, children }) => {
   const [state, setState] = useState({ loading: true, allowed: false, redirect: '/', message: '' });
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    let profileUnsubscribe = () => {};
+    const unsub = onAuthStateChanged(auth, (user) => {
       if (!user) {
+        profileUnsubscribe();
         setState({ loading: false, allowed: false, redirect: '/', message: '' });
         return;
       }
 
-      try {
-        const snap = await getDoc(doc(db, COLLECTIONS.users, user.uid));
-        const profile = snap.exists() ? snap.data() : null;
+      profileUnsubscribe();
+      profileUnsubscribe = onSnapshot(doc(db, COLLECTIONS.users, user.uid), async (snap) => {
+        try {
+          const profile = snap.exists() ? snap.data() : null;
 
-        if (!profile) {
+          if (!profile) {
+            setState({ loading: false, allowed: false, redirect: '/', message: '' });
+            return;
+          }
+
+          if (profile.status && profile.status !== 'Active') {
+            profileUnsubscribe();
+            await signOut(auth);
+            setState({
+              loading: false,
+              allowed: false,
+              redirect: '/',
+              message: 'This account is not active. Please contact the administrator.',
+            });
+            return;
+          }
+
+          if (profile.requiresPasswordChange) {
+            setState({
+              loading: false,
+              allowed: false,
+              redirect: '/',
+              message: 'Please sign in and change your temporary password before accessing the portal.',
+            });
+            return;
+          }
+
+          const hasAccess = routeAllows(profile, allowed);
+          const fallback = routeAllows(profile, 'applicant') ? '/applicant-dashboard' : '/dashboard';
+          setState({ loading: false, allowed: hasAccess, redirect: hasAccess ? '' : fallback, message: '' });
+        } catch (error) {
+          console.error('Route guard error:', error);
           setState({ loading: false, allowed: false, redirect: '/', message: '' });
-          return;
         }
-
-        if (profile.requiresPasswordChange) {
-          setState({
-            loading: false,
-            allowed: false,
-            redirect: '/',
-            message: 'Please sign in and change your temporary password before accessing the portal.',
-          });
-          return;
-        }
-
-        const hasAccess = routeAllows(profile, allowed);
-        const fallback = routeAllows(profile, 'applicant') ? '/applicant-dashboard' : '/dashboard';
-        setState({ loading: false, allowed: hasAccess, redirect: hasAccess ? '' : fallback, message: '' });
-      } catch (error) {
-        console.error('Route guard error:', error);
+      }, (error) => {
+        console.error('Profile listener error:', error);
         setState({ loading: false, allowed: false, redirect: '/', message: '' });
-      }
+      });
     });
 
-    return () => unsub();
+    return () => {
+      unsub();
+      profileUnsubscribe();
+    };
   }, [allowed]);
 
   if (state.loading) return <RouteFallback />;

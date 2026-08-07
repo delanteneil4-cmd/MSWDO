@@ -30,7 +30,7 @@ import {
   getMemberCategory,
   isBeneficiaryUser,
 } from './utils/dataModel';
-import { getAssignedCategories, getStaffInfo, logActivity } from './utils/approvalWorkflow';
+import { getAssignedCategories, getStaffInfo, logActivity, sendWorkflowEmailAndTrack } from './utils/approvalWorkflow';
 
 const NavItem = ({ icon: Icon, label, active, badge, onClick }) => (
   <button
@@ -142,6 +142,7 @@ const Benefits = () => {
   const [benefitForm, setBenefitForm] = useState(emptyBenefitForm);
   const [claimForm, setClaimForm] = useState(emptyClaimForm);
   const [selectedClaim, setSelectedClaim] = useState(null);
+  const [claimDialog, setClaimDialog] = useState({ open: false, type: '', claim: null, amount: '', releaseMethod: 'Cash', referenceNumber: '', remarks: '', reason: '' });
   const [userName, setUserName] = useState('Admin');
   const [userInitials, setUserInitials] = useState('A');
   const [userRole, setUserRole] = useState('Admin');
@@ -349,8 +350,16 @@ const Benefits = () => {
     if (!member || !benefit || !claimForm.amount) return;
 
     const amount = Number(claimForm.amount);
-    if (Number.isNaN(amount) || amount < 0) {
-      alert('Enter a valid claim amount.');
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert('Claim amount must be greater than zero.');
+      return;
+    }
+    if (!claimForm.releaseDate) {
+      alert('Release date is required.');
+      return;
+    }
+    if (!claimForm.referenceNumber.trim()) {
+      alert('Reference or voucher number is required.');
       return;
     }
 
@@ -371,9 +380,10 @@ const Benefits = () => {
         return;
       }
 
-      await addDoc(collection(db, COLLECTIONS.claims), {
+      const claimRef = await addDoc(collection(db, COLLECTIONS.claims), {
         memberId: member.id,
         memberName,
+        email: member.email || '',
         memberIdNumber: member.idNumber || '',
         benefitId: benefit.id,
         benefitName: benefit.name,
@@ -411,6 +421,19 @@ const Benefits = () => {
         adminName: staff.name,
         details: `${benefit.name} - ${formatCurrency(amount)}`,
       });
+      void sendWorkflowEmailAndTrack({
+        db,
+        collectionName: COLLECTIONS.claims,
+        recordId: claimRef.id,
+        email: member.email,
+        applicantName: memberName,
+        status: CLAIM_STATUS.processed,
+        categoryName: getCategoryDisplayName(category),
+        benefitName: benefit.name,
+        amount: formatCurrency(amount),
+        subject: 'Your MSWDO benefit claim was processed',
+        message: `Your ${benefit.name} benefit claim has been processed. Released value: ${formatCurrency(amount)}.`,
+      }).catch((error) => console.error('Processed claim email error:', error));
 
       setClaimForm(emptyClaimForm);
       await fetchData();
@@ -422,20 +445,20 @@ const Benefits = () => {
     }
   };
 
-  const handleProcessPendingClaim = async (claim) => {
-    const amountInput = window.prompt('Actual amount/value released:', String(claim.amount || ''));
-    if (amountInput === null) return;
-    const amount = Number(amountInput);
-    if (Number.isNaN(amount) || amount < 0) {
-      alert('Enter a valid amount.');
+  const handleProcessPendingClaim = (claim) => setClaimDialog({ open: true, type: 'process', claim, amount: String(claim.amount || ''), releaseMethod: claim.releaseMethod || 'Cash', referenceNumber: claim.referenceNumber || '', remarks: claim.remarks || '', reason: '' });
+
+  const processPendingClaim = async (claim, form) => {
+    const amount = Number(form.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert('Amount must be greater than zero.');
       return;
     }
-    const releaseMethod = window.prompt('Release method:', claim.releaseMethod || 'Cash');
+    const { releaseMethod, referenceNumber, remarks } = form;
     if (!releaseMethod?.trim()) return;
-    const referenceNumber = window.prompt('Reference / voucher number:', claim.referenceNumber || '');
-    if (referenceNumber === null) return;
-    const remarks = window.prompt('Processing remarks:', claim.remarks || '');
-    if (remarks === null) return;
+    if (!referenceNumber?.trim()) {
+      alert('Reference or voucher number is required.');
+      return;
+    }
 
     setActionLoading(true);
     try {
@@ -474,6 +497,19 @@ const Benefits = () => {
         adminName: staff.name,
         details: `${claim.benefitName} - ${formatCurrency(amount)}`,
       });
+      void sendWorkflowEmailAndTrack({
+        db,
+        collectionName: COLLECTIONS.claims,
+        recordId: claim.id,
+        email: claim.requestedBy?.email || claim.email,
+        applicantName: claim.memberName,
+        status: CLAIM_STATUS.processed,
+        categoryName: getCategoryDisplayName(claim.category),
+        benefitName: claim.benefitName,
+        amount: formatCurrency(amount),
+        subject: 'Your MSWDO benefit claim was processed',
+        message: `Your ${claim.benefitName} benefit claim has been processed. Released value: ${formatCurrency(amount)}.`,
+      }).catch((error) => console.error('Processed claim email error:', error));
 
       await fetchData();
     } catch (error) {
@@ -513,8 +549,10 @@ const Benefits = () => {
     }
   };
 
-  const handleRejectClaim = async (claim) => {
-    const reason = window.prompt('Reason for rejecting this claim:');
+  const handleRejectClaim = (claim) => setClaimDialog({ open: true, type: 'reject', claim, amount: '', releaseMethod: 'Cash', referenceNumber: '', remarks: '', reason: '' });
+
+  const rejectClaim = async (claim, form) => {
+    const reason = form.reason;
     if (!reason?.trim()) return;
 
     setActionLoading(true);
@@ -550,6 +588,18 @@ const Benefits = () => {
         adminName: staff.name,
         details: `${claim.benefitName} - ${reason.trim()}`,
       });
+      void sendWorkflowEmailAndTrack({
+        db,
+        collectionName: COLLECTIONS.claims,
+        recordId: claim.id,
+        email: claim.requestedBy?.email || claim.email,
+        applicantName: claim.memberName,
+        status: CLAIM_STATUS.rejected,
+        categoryName: getCategoryDisplayName(claim.category),
+        benefitName: claim.benefitName,
+        subject: 'Your MSWDO benefit claim was rejected',
+        message: `Your ${claim.benefitName} benefit claim was rejected. Reason: ${reason.trim()}`,
+      }).catch((error) => console.error('Rejected claim email error:', error));
 
       await fetchData();
     } catch (error) {
@@ -560,8 +610,10 @@ const Benefits = () => {
     }
   };
 
-  const handleCancelClaim = async (claim) => {
-    const reason = window.prompt('Reason for cancelling this claim:');
+  const handleCancelClaim = (claim) => setClaimDialog({ open: true, type: 'cancel', claim, amount: '', releaseMethod: 'Cash', referenceNumber: '', remarks: '', reason: '' });
+
+  const cancelClaim = async (claim, form) => {
+    const reason = form.reason;
     if (!reason?.trim()) return;
 
     setActionLoading(true);
@@ -597,6 +649,18 @@ const Benefits = () => {
         adminName: staff.name,
         details: `${claim.benefitName} - ${reason.trim()}`,
       });
+      void sendWorkflowEmailAndTrack({
+        db,
+        collectionName: COLLECTIONS.claims,
+        recordId: claim.id,
+        email: claim.requestedBy?.email || claim.email,
+        applicantName: claim.memberName,
+        status: CLAIM_STATUS.cancelled,
+        categoryName: getCategoryDisplayName(claim.category),
+        benefitName: claim.benefitName,
+        subject: 'Your MSWDO benefit claim was cancelled',
+        message: `Your ${claim.benefitName} benefit claim was cancelled. Reason: ${reason.trim()}`,
+      }).catch((error) => console.error('Cancelled claim email error:', error));
 
       await fetchData();
     } catch (error) {
@@ -605,6 +669,15 @@ const Benefits = () => {
     } finally {
       setActionLoading(false);
     }
+  };
+
+  const confirmClaimDialog = async () => {
+    if (!claimDialog.claim || (claimDialog.type !== 'process' && !claimDialog.reason.trim())) return;
+    const { claim, type } = claimDialog;
+    if (type === 'process') await processPendingClaim(claim, claimDialog);
+    if (type === 'reject') await rejectClaim(claim, claimDialog);
+    if (type === 'cancel') await cancelClaim(claim, claimDialog);
+    if (!actionLoading) setClaimDialog({ open: false, type: '', claim: null, amount: '', releaseMethod: 'Cash', referenceNumber: '', remarks: '', reason: '' });
   };
 
   const handlePrintVoucher = (claim) => {
@@ -670,6 +743,37 @@ const Benefits = () => {
     voucherWindow.document.close();
   };
 
+  const handleResendClaimEmail = async (claim) => {
+    const recipient = claim.requestedBy?.email || claim.email;
+    if (!recipient) return;
+    setActionLoading(true);
+    try {
+      const isRejected = claim.status === CLAIM_STATUS.rejected;
+      const isCancelled = claim.status === CLAIM_STATUS.cancelled;
+      const statusLabel = isRejected ? 'rejected' : isCancelled ? 'cancelled' : claim.status === CLAIM_STATUS.pending ? 'submitted' : 'processed';
+      const reason = claim.rejectionReason || claim.cancelReason || '';
+      await sendWorkflowEmailAndTrack({
+        db,
+        collectionName: COLLECTIONS.claims,
+        recordId: claim.id,
+        email: recipient,
+        applicantName: claim.memberName,
+        status: claim.status,
+        categoryName: getCategoryDisplayName(claim.category),
+        benefitName: claim.benefitName,
+        amount: claim.amount ? formatCurrency(claim.amount) : '',
+        subject: `Your MSWDO benefit claim was ${statusLabel}`,
+        message: `Your ${claim.benefitName} benefit claim was ${statusLabel}.${reason ? ` Reason: ${reason}` : ''}`,
+      });
+      setSelectedClaim((current) => current ? { ...current, emailStatus: 'sent', emailError: '' } : current);
+    } catch (error) {
+      console.error('Resend claim email error:', error);
+      setSelectedClaim((current) => current ? { ...current, emailStatus: 'failed', emailError: error.message || 'Email delivery failed' } : current);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const handleLogout = async () => {
     await signOut(auth);
     navigate('/');
@@ -696,7 +800,7 @@ const Benefits = () => {
             <NavItem icon={Gift} label="Benefits" active />
             <NavItem icon={UserX} label="Termination" onClick={() => navigate('/termination')} />
             <NavItem icon={Bell} label="Announcements" onClick={() => navigate('/announcements')} />
-            <NavItem icon={BarChart2} label="Reports" />
+            <NavItem icon={BarChart2} label="Reports" onClick={() => navigate('/reports')} />
           </div>
           <div className="mt-8 mb-4 h-px w-full bg-white/5" />
           <div className="space-y-0.5">
@@ -842,12 +946,12 @@ const Benefits = () => {
                 </div>
                 <div>
                   <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Claim Amount / Value</label>
-                  <input required type="number" min="0" step="0.01" value={claimForm.amount} onChange={(e) => handleClaimChange('amount', e.target.value)}
+                  <input required type="number" min="0.01" step="0.01" value={claimForm.amount} onChange={(e) => handleClaimChange('amount', e.target.value)}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium outline-none focus:border-emerald-400" />
                 </div>
                 <div>
                   <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Release Method</label>
-                  <select value={claimForm.releaseMethod} onChange={(e) => handleClaimChange('releaseMethod', e.target.value)}
+                  <select required value={claimForm.releaseMethod} onChange={(e) => handleClaimChange('releaseMethod', e.target.value)}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium outline-none focus:border-emerald-400">
                     <option value="Cash">Cash</option>
                     <option value="Check">Check</option>
@@ -858,17 +962,17 @@ const Benefits = () => {
                 </div>
                 <div>
                   <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Release Date</label>
-                  <input type="date" value={claimForm.releaseDate} onChange={(e) => handleClaimChange('releaseDate', e.target.value)}
+                  <input required type="date" max={new Date().toISOString().slice(0, 10)} value={claimForm.releaseDate} onChange={(e) => handleClaimChange('releaseDate', e.target.value)}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium outline-none focus:border-emerald-400" />
                 </div>
                 <div>
                   <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Reference / Voucher No.</label>
-                  <input value={claimForm.referenceNumber} onChange={(e) => handleClaimChange('referenceNumber', e.target.value)}
+                  <input required maxLength="80" value={claimForm.referenceNumber} onChange={(e) => handleClaimChange('referenceNumber', e.target.value)}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium outline-none focus:border-emerald-400" />
                 </div>
                 <div>
                   <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Remarks</label>
-                  <input value={claimForm.remarks} onChange={(e) => handleClaimChange('remarks', e.target.value)}
+                  <input maxLength="500" value={claimForm.remarks} onChange={(e) => handleClaimChange('remarks', e.target.value)}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium outline-none focus:border-emerald-400" />
                 </div>
               </div>
@@ -1012,6 +1116,23 @@ const Benefits = () => {
         </div>
       </div>
 
+      {claimDialog.open && (
+        <div className="fixed inset-0 z-50 bg-slate-950/45 p-4 flex items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="claim-action-title">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl border border-slate-200 p-6">
+            <h3 id="claim-action-title" className="text-lg font-bold text-slate-800">{claimDialog.type === 'process' ? 'Process benefit claim' : claimDialog.type === 'reject' ? 'Reject benefit claim' : 'Cancel benefit claim'}</h3>
+            <p className="text-sm text-slate-500 mt-1">{claimDialog.claim?.benefitName || 'Benefit request'} for {claimDialog.claim?.memberName || 'beneficiary'}</p>
+            {claimDialog.type === 'process' ? (
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <label className="text-xs font-bold text-slate-500">Actual amount/value<input type="number" min="0" step="0.01" value={claimDialog.amount} onChange={(event) => setClaimDialog((value) => ({ ...value, amount: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium" /></label>
+                <label className="text-xs font-bold text-slate-500">Release method<select value={claimDialog.releaseMethod} onChange={(event) => setClaimDialog((value) => ({ ...value, releaseMethod: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium"><option>Cash</option><option>Check</option><option>Bank Transfer</option><option>Goods / In-kind</option><option>Service Referral</option></select></label>
+                <label className="text-xs font-bold text-slate-500 sm:col-span-2">Reference / voucher number<input value={claimDialog.referenceNumber} onChange={(event) => setClaimDialog((value) => ({ ...value, referenceNumber: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium" /></label>
+                <label className="text-xs font-bold text-slate-500 sm:col-span-2">Processing remarks<textarea rows="3" value={claimDialog.remarks} onChange={(event) => setClaimDialog((value) => ({ ...value, remarks: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium resize-none" /></label>
+              </div>
+            ) : <label className="block mt-4 text-xs font-bold text-slate-500">Reason<textarea autoFocus rows="4" value={claimDialog.reason} onChange={(event) => setClaimDialog((value) => ({ ...value, reason: event.target.value }))} placeholder="Reason is required" className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium resize-none" /></label>}
+            <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setClaimDialog({ open: false, type: '', claim: null, amount: '', releaseMethod: 'Cash', referenceNumber: '', remarks: '', reason: '' })} className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-bold text-slate-600">Cancel</button><button type="button" onClick={confirmClaimDialog} disabled={actionLoading || (claimDialog.type !== 'process' && !claimDialog.reason.trim())} className="px-4 py-2 rounded-xl bg-teal-600 text-white text-sm font-bold disabled:opacity-50">{actionLoading ? 'Saving...' : 'Confirm'}</button></div>
+          </div>
+        </div>
+      )}
       <AnimatePresence>
         {selectedClaim && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -1069,6 +1190,16 @@ const Benefits = () => {
                 <div className="rounded-xl bg-emerald-50 border border-emerald-100 p-4">
                   <p className="text-[10px] text-emerald-600 font-bold uppercase mb-1">Processed By</p>
                   <p className="text-sm font-semibold text-emerald-800">{selectedClaim.processedBy?.name || selectedClaim.processedBy?.email || selectedClaim.reviewedBy?.name || selectedClaim.rejectedBy?.name || selectedClaim.cancelledBy?.name || 'Not processed yet'}</p>
+                </div>
+                <div className="rounded-xl bg-slate-50 border border-slate-200 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Email Notification</p>
+                      <p className={`text-sm font-semibold ${selectedClaim.emailStatus === 'failed' ? 'text-red-600' : selectedClaim.emailStatus === 'sent' ? 'text-emerald-600' : 'text-slate-600'}`}>{selectedClaim.emailStatus === 'sent' ? 'Sent' : selectedClaim.emailStatus === 'failed' ? 'Failed' : 'Not sent yet'}</p>
+                    </div>
+                    <button type="button" onClick={() => handleResendClaimEmail(selectedClaim)} disabled={actionLoading || !(selectedClaim.requestedBy?.email || selectedClaim.email)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-50">{actionLoading ? 'Sending...' : 'Resend email'}</button>
+                  </div>
+                  {selectedClaim.emailError && <p className="mt-2 text-[11px] text-red-600">{selectedClaim.emailError}</p>}
                 </div>
                 <button
                   onClick={() => handlePrintVoucher(selectedClaim)}

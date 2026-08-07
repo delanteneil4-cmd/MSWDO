@@ -14,6 +14,7 @@ const ProtectedRoute = lazy(() => import('./ProtectedRoute'));
 const Termination = lazy(() => import('./Termination'));
 const AuditMonitoring = lazy(() => import('./AuditMonitoring'));
 const Announcements = lazy(() => import('./Announcements'));
+const Reports = lazy(() => import('./Reports'));
 
 const RouteFallback = () => (
   <div className="min-h-screen bg-slate-50 flex items-center justify-center font-sans">
@@ -37,6 +38,7 @@ function App() {
           <Route path="/termination" element={<ProtectedRoute allowed="staff"><Termination /></ProtectedRoute>} />
           <Route path="/audit" element={<ProtectedRoute allowed="staff"><AuditMonitoring /></ProtectedRoute>} />
           <Route path="/announcements" element={<ProtectedRoute allowed="staff"><Announcements /></ProtectedRoute>} />
+          <Route path="/reports" element={<ProtectedRoute allowed="staff"><Reports /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>

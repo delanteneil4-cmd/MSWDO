@@ -91,7 +91,7 @@ const AnnouncementForm = ({ form, setForm, assignedCategories, editing, saving, 
         <label className="flex items-center gap-2 text-xs font-semibold text-slate-600"><input type="checkbox" checked={form.pinned} onChange={(event) => setForm({ ...form, pinned: event.target.checked })} className="accent-teal-600" />Pin announcement</label>
         <label className="flex items-center gap-2 text-xs font-semibold text-slate-600"><input type="checkbox" checked={form.published} onChange={(event) => setForm({ ...form, published: event.target.checked })} className="accent-teal-600" />Published</label>
       </div>
-      <button disabled={saving} className="w-full py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold disabled:opacity-60">{saving ? 'Saving...' : editing ? 'Save Changes' : 'Publish Announcement'}</button>
+      <button disabled={saving} className="w-full py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold disabled:opacity-60">{saving ? 'Saving...' : editing ? 'Save Changes' : form.published ? 'Publish Announcement' : 'Save Draft'}</button>
     </form>
   );
 };
@@ -152,14 +152,19 @@ const Announcements = () => {
 
   const submit = async (event) => {
     event.preventDefault();
+    if (!form.title.trim()) { window.alert('Announcement title is required.'); return; }
+    if (!form.body.trim()) { window.alert('Announcement message is required.'); return; }
     if (!form.targetCategories.length) { window.alert('Select at least one audience category.'); return; }
+    if (form.expiresAt && form.expiresAt < new Date().toISOString().slice(0, 10)) { window.alert('Expiry date cannot be in the past.'); return; }
     setSaving(true);
     try {
       const announcement = { ...form, title: form.title.trim(), body: form.body.trim(), targetLabels: form.targetCategories.map(getCategoryDisplayName), updatedAt: serverTimestamp(), updatedBy: staff };
       let announcementId = editing;
       if (editing) await updateDoc(doc(db, COLLECTIONS.announcements, editing), announcement);
       else announcementId = (await addDoc(collection(db, COLLECTIONS.announcements), { ...announcement, createdAt: serverTimestamp(), createdBy: staff })).id;
-      await Promise.all(form.targetCategories.map((categoryId) => logActivity(db, { type: editing ? 'announcement_updated' : 'announcement_published', action: editing ? 'Announcement Updated' : 'Announcement Published', details: form.title.trim(), announcementId, categoryId, category: getCategoryDisplayName(categoryId), adminUid: staff.uid, adminEmail: staff.email, adminName: staff.name })));
+      const activityType = editing ? 'announcement_updated' : form.published ? 'announcement_published' : 'announcement_draft_created';
+      const activityAction = editing ? 'Announcement Updated' : form.published ? 'Announcement Published' : 'Announcement Draft Created';
+      await Promise.all(form.targetCategories.map((categoryId) => logActivity(db, { type: activityType, action: activityAction, details: form.title.trim(), announcementId, categoryId, category: getCategoryDisplayName(categoryId), adminUid: staff.uid, adminEmail: staff.email, adminName: staff.name })));
       if (!editing && form.published) await writeNotifications(announcementId, announcement);
       resetForm();
       await loadItems(assignedCategories);

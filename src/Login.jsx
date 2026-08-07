@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { auth, db } from './firebase';
-import { signInWithEmailAndPassword, updatePassword } from 'firebase/auth';
+import { sendPasswordResetEmail, signInWithEmailAndPassword, updatePassword } from 'firebase/auth';
 import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { COLLECTIONS, isBeneficiaryUser } from './utils/dataModel';
@@ -29,10 +29,12 @@ const Login = () => {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [pendingUser, setPendingUser] = useState(null);
+  const [resetNotice, setResetNotice] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setResetNotice('');
     setLoading(true);
     
     try {
@@ -49,6 +51,10 @@ const Login = () => {
         if (userDocSnap.exists()) {
           const userData = userDocSnap.data();
           const roleName = String(userData.role || '').toLowerCase();
+          if (userData.status && userData.status !== 'Active') {
+            await auth.signOut();
+            throw new Error('This account is not active. Please contact the administrator.');
+          }
           
           if (adminType === 'admin' && !['admin', 'staff'].includes(roleName)) {
             await auth.signOut();
@@ -75,6 +81,10 @@ const Login = () => {
           if (adminDocSnap.exists()) {
             const adminData = adminDocSnap.data();
             const roleName = String(adminData.role || '').toLowerCase();
+            if (adminData.status && adminData.status !== 'Active') {
+              await auth.signOut();
+              throw new Error('This account is not active. Please contact the administrator.');
+            }
             
             if (adminType === 'admin' && !['admin', 'staff'].includes(roleName)) {
               await auth.signOut();
@@ -113,6 +123,10 @@ const Login = () => {
         
         if (userDocSnap.exists()) {
           const userData = userDocSnap.data();
+          if (userData.status && userData.status !== 'Active') {
+            await auth.signOut();
+            throw new Error('This account is not active. Please contact the administrator.');
+          }
           if (!isBeneficiaryUser(userData)) {
             await auth.signOut();
             throw new Error("Access denied. Applicant credentials required.");
@@ -141,10 +155,36 @@ const Login = () => {
     }
   };
 
+  const handleForgotPassword = async () => {
+    setError('');
+    setResetNotice('');
+    const value = email.trim();
+    const resetEmail = viewMode === 'admin' && !value.includes('@')
+      ? `${value}@mswdo.gov.ph`
+      : value.toLowerCase();
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resetEmail)) {
+      setError('Enter your registered email address first.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await sendPasswordResetEmail(auth, resetEmail);
+      setResetNotice(`Password reset instructions were sent to ${resetEmail}. Check your inbox and spam folder.`);
+    } catch (err) {
+      console.error('Password reset error:', err);
+      setError('Password reset could not be sent. Check the email address and try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const resetForm = () => {
     setEmail('');
     setPassword('');
     setError('');
+    setResetNotice('');
     setShowPassword(false);
   };
 
@@ -159,8 +199,8 @@ const Login = () => {
       setError("Passwords do not match.");
       return;
     }
-    if (newPassword.length < 6) {
-      setError("Password must be at least 6 characters.");
+    if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(newPassword)) {
+      setError("Use at least 8 characters with uppercase, lowercase, and a number.");
       return;
     }
     
@@ -188,32 +228,34 @@ const Login = () => {
   };
 
   return (
-    <div className="flex min-h-screen w-full bg-[#f8fafc] font-sans">
+    <div className="flex min-h-screen w-full bg-[#f8fafc] font-sans lg:h-screen lg:overflow-hidden">
       
       {/* LEFT PANEL */}
-      <div className="hidden lg:flex flex-col relative w-[45%] bg-[#102a43] overflow-hidden">
+      <div className="hidden lg:flex flex-col relative w-1/2 bg-[#073b3a] overflow-hidden">
+        <img src="/mswdo-community-hero-portrait.png" alt="MSWDO social worker assisting a Filipino family" className="absolute inset-0 z-0 h-full w-full object-cover object-center" />
+        <div className="absolute inset-0 z-[1] bg-gradient-to-b from-[#052f2e]/35 via-transparent to-[#052f2e]/55" />
         {/* Abstract Background Elements */}
         <div 
-          className="absolute inset-0 z-0 opacity-20"
+          className="hidden absolute inset-0 z-0 opacity-20"
           style={{
             backgroundImage: 'radial-gradient(circle at 15% 50%, rgba(29, 78, 216, 0.4), transparent 25%), radial-gradient(circle at 85% 30%, rgba(29, 78, 216, 0.4), transparent 25%)'
           }}
         />
         <div 
-          className="absolute inset-0 z-0 opacity-10"
+          className="hidden absolute inset-0 z-0 opacity-10"
           style={{
             backgroundImage: 'radial-gradient(circle at 50% 100%, rgba(59, 130, 246, 0.4), transparent 40%)'
           }}
         />
         <div 
-          className="absolute inset-0 z-0 opacity-5"
+          className="hidden absolute inset-0 z-0 opacity-5"
           style={{
             backgroundImage: 'linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)',
             backgroundSize: '40px 40px'
           }}
         />
 
-        <div className="relative z-10 flex-grow flex flex-col p-12 pr-16 justify-between">
+        <div className="relative z-10 flex-grow flex flex-col p-8 xl:p-10">
           
           {/* Top Header */}
           <div className="flex items-center space-x-3">
@@ -222,24 +264,24 @@ const Login = () => {
             </div>
             <div>
               <h2 className="text-white font-bold text-sm leading-tight tracking-wide">MSWDO</h2>
-              <p className="text-blue-400 text-[9px] uppercase font-bold tracking-widest">Municipal Social Welfare</p>
+              <p className="text-teal-100 text-[9px] uppercase font-bold tracking-widest">Municipal Social Welfare and Development Office</p>
             </div>
           </div>
 
           {/* Main Content */}
-          <div className="mt-16 mb-auto">
-            <p className="text-blue-500 font-black text-[10px] tracking-[0.2em] uppercase mb-4">
-              Republic of the Philippines
+          <div className="mt-auto mb-5 max-w-xl px-1 pb-2">
+            <p className="text-teal-100 font-black text-[10px] tracking-[0.2em] uppercase mb-4">
+              Accessible community services
             </p>
-            <h1 className="text-5xl font-extrabold text-white leading-[1.1] tracking-tight mb-6">
-              Digital<br/>Information<br/>Management
+            <h1 className="text-4xl xl:text-5xl font-extrabold text-white leading-[1.08] tracking-tight mb-4 drop-shadow-lg">
+              Social welfare<br/>support, made<br/>easier to access.
             </h1>
-            <p className="text-slate-400 text-sm max-w-sm leading-relaxed mb-10 font-normal">
-              A unified welfare management platform serving Senior Citizens, PWDs, Youth, and Women beneficiaries across all barangays.
+            <p className="text-teal-50/90 text-sm max-w-md leading-relaxed mb-6 font-normal">
+              Apply for programs, monitor requests, and receive assistance updates through one secure municipal portal.
             </p>
 
             {/* Grid Stats */}
-            <div className="grid grid-cols-2 gap-4 max-w-md mb-8">
+            <div className="hidden grid-cols-2 gap-4 max-w-md mb-8">
               <div className="bg-[#122444] rounded-xl p-5 border border-white/5 hover:bg-[#162a4e] transition-colors">
                 <Users size={18} className="text-slate-400 mb-2" />
                 <h3 className="text-white font-bold text-2xl">950+</h3>
@@ -284,8 +326,8 @@ const Login = () => {
           </div>
 
           {/* Footer */}
-          <div className="flex items-center justify-between text-slate-500 text-[10px] mt-8">
-            <p>© 2024 MSWDO · Republic of the Philippines</p>
+          <div className="flex items-center justify-between text-teal-50/65 text-[10px] border-t border-white/10 pt-4">
+            <p>Protected under the Data Privacy Act of 2012</p>
             <div className="flex items-center space-x-1.5 bg-green-500/10 px-2.5 py-1 rounded-full border border-green-500/20 text-green-400">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
               <span className="font-semibold tracking-wider">System Online</span>
@@ -295,8 +337,12 @@ const Login = () => {
       </div>
 
       {/* RIGHT PANEL */}
-      <div className="flex-1 flex flex-col items-center justify-center p-6 relative">
-        <div className="w-full max-w-[420px]">
+      <div className="flex-1 flex flex-col items-center justify-start xl:justify-center px-4 py-6 sm:p-8 relative overflow-y-auto bg-[radial-gradient(circle_at_top_right,_rgba(13,148,136,0.10),_transparent_35%)]">
+        <div className="mb-5 flex w-full max-w-[420px] items-center gap-3 lg:hidden">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-teal-700 text-white"><ShieldCheck size={20} /></div>
+          <div><p className="text-sm font-black text-slate-800">MSWDO</p><p className="text-[10px] font-semibold text-slate-500">Municipal Social Welfare Portal</p></div>
+        </div>
+        <div className="my-auto w-full max-w-[420px] py-4">
           
           <AnimatePresence mode="wait">
             {viewMode === 'selection' ? (
@@ -319,7 +365,7 @@ const Login = () => {
                     {/* Admin Portal Button */}
                     <button 
                       onClick={() => setViewMode('admin')}
-                      className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-blue-500 hover:bg-blue-50 text-left group transition-all duration-200"
+                      className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-blue-500 hover:bg-blue-50 hover:-translate-y-0.5 hover:shadow-md text-left group transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
                       <div className="flex items-center space-x-4">
                         <div className="w-12 h-12 rounded-xl bg-[#3b66df] text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition-transform">
@@ -336,7 +382,7 @@ const Login = () => {
                     {/* Beneficiary Portal Button */}
                     <button 
                       onClick={() => setViewMode('beneficiary')}
-                      className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-emerald-500 hover:bg-emerald-50 text-left group transition-all duration-200"
+                      className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-emerald-500 hover:bg-emerald-50 hover:-translate-y-0.5 hover:shadow-md text-left group transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                     >
                       <div className="flex items-center space-x-4">
                         <div className="w-12 h-12 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition-transform">
@@ -353,15 +399,15 @@ const Login = () => {
                     {/* Apply for Benefits Button */}
                     <button 
                       onClick={() => navigate('/apply')}
-                      className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-purple-500 hover:bg-purple-50 text-left group transition-all duration-200"
+                      className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-purple-500 hover:bg-purple-50 hover:-translate-y-0.5 hover:shadow-md text-left group transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-500"
                     >
                       <div className="flex items-center space-x-4">
                         <div className="w-12 h-12 rounded-xl bg-purple-600 text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition-transform">
                           <FileText size={22} />
                         </div>
                         <div>
-                          <h3 className="font-bold text-slate-900 text-sm group-hover:text-purple-700 transition-colors">Applicant Registration</h3>
-                          <p className="text-xs text-slate-500 mt-0.5">Apply for social welfare programs</p>
+                          <h3 className="font-bold text-slate-900 text-sm group-hover:text-purple-700 transition-colors">Program Application</h3>
+                          <p className="text-xs text-slate-500 mt-0.5">Submit a new application for MSWDO assistance</p>
                         </div>
                       </div>
                       <ChevronRight size={18} className="text-slate-300 group-hover:text-purple-500 transform group-hover:translate-x-1 transition-all" />
@@ -409,6 +455,7 @@ const Login = () => {
                       {error}
                     </div>
                   )}
+                  {resetNotice && <div className="mb-6 p-3 bg-emerald-50 border-l-4 border-emerald-500 text-emerald-700 text-xs font-medium rounded-r">{resetNotice}</div>}
 
                   <div className="grid grid-cols-2 gap-4 mb-6">
                     {/* Admin Staff Box */}
@@ -468,6 +515,7 @@ const Login = () => {
                         </div>
                         <input
                           type={adminType === 'admin' ? "email" : "text"}
+                          autoComplete="username"
                           required
                           value={email}
                           onChange={(e) => setEmail(e.target.value)}
@@ -480,7 +528,7 @@ const Login = () => {
                     <div className="space-y-1.5 text-left">
                       <div className="flex justify-between items-center">
                         <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider">PASSWORD</label>
-                        <button type="button" className="text-[11px] text-[#3b66df] hover:underline font-bold">Forgot password?</button>
+                        <button type="button" onClick={handleForgotPassword} disabled={loading} className="text-[11px] text-[#3b66df] hover:underline font-bold disabled:opacity-50">Forgot password?</button>
                       </div>
                       <div className="relative group">
                         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -488,6 +536,7 @@ const Login = () => {
                         </div>
                         <input
                           type={showPassword ? "text" : "password"}
+                          autoComplete="current-password"
                           required
                           value={password}
                           onChange={(e) => setPassword(e.target.value)}
@@ -502,19 +551,6 @@ const Login = () => {
                           {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                         </button>
                       </div>
-                    </div>
-
-                    <div className="flex items-center space-x-2.5 pt-1 pb-2">
-                      <div className="relative flex items-center justify-center">
-                        <input 
-                          type="checkbox" 
-                          id="keep-signed-in" 
-                          className="w-4 h-4 rounded border-slate-300 text-[#3b66df] focus:ring-[#3b66df]" 
-                        />
-                      </div>
-                      <label htmlFor="keep-signed-in" className="text-xs text-slate-600 font-medium cursor-pointer">
-                        Keep me signed in for 30 days
-                      </label>
                     </div>
 
                     <button
@@ -560,6 +596,7 @@ const Login = () => {
                       {error}
                     </div>
                   )}
+                  {resetNotice && <div className="mb-6 p-3 bg-emerald-50 border-l-4 border-emerald-500 text-emerald-700 text-xs font-medium rounded-r">{resetNotice}</div>}
 
                   <div className="bg-[#f0fdf4] rounded-xl p-4 border border-emerald-100 flex items-start space-x-3 mb-6">
                     <div className="w-6 h-6 rounded-full bg-emerald-100 text-[#057a55] flex items-center justify-center shrink-0">
@@ -585,6 +622,7 @@ const Login = () => {
                         </div>
                         <input
                           type="email"
+                          autoComplete="username"
                           required
                           value={email}
                           onChange={(e) => setEmail(e.target.value)}
@@ -597,7 +635,7 @@ const Login = () => {
                     <div className="space-y-1.5 text-left">
                       <div className="flex justify-between items-center">
                         <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider">PASSWORD</label>
-                        <button type="button" className="text-[11px] text-[#057a55] hover:underline font-bold">Need help?</button>
+                        <button type="button" onClick={handleForgotPassword} disabled={loading} className="text-[11px] text-[#057a55] hover:underline font-bold disabled:opacity-50">Forgot password?</button>
                       </div>
                       <div className="relative group">
                         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -605,6 +643,7 @@ const Login = () => {
                         </div>
                         <input
                           type={showPassword ? "text" : "password"}
+                          autoComplete="current-password"
                           required
                           value={password}
                           onChange={(e) => setPassword(e.target.value)}
@@ -633,7 +672,7 @@ const Login = () => {
 
                     <div className="text-center pt-3">
                       <p className="text-[11px] text-slate-500 font-medium">
-                        Not registered yet? <button type="button" onClick={() => navigate('/apply')} className="text-[#057a55] font-bold hover:underline">Applicant Registration</button>
+                        Need to apply? <button type="button" onClick={() => navigate('/apply')} className="text-[#057a55] font-bold hover:underline">Start a Program Application</button>
                       </p>
                     </div>
 
@@ -643,10 +682,9 @@ const Login = () => {
             )}
           </AnimatePresence>
 
-          <div className="text-center mt-8 space-y-2">
-            <p className="text-xs text-slate-400 font-medium">
-              For access issues, contact your <span className="text-blue-500 cursor-pointer hover:underline">System Administrator</span>
-            </p>
+          <div className="mt-7 rounded-xl border border-slate-200/80 bg-white/70 p-4 text-center shadow-sm backdrop-blur-sm">
+            <div className="flex items-center justify-center gap-2 text-xs font-bold text-slate-600"><ShieldCheck size={14} className="text-teal-600" />Your information is handled securely</div>
+            <p className="mt-1.5 text-[10px] leading-4 text-slate-500">Protected under the Data Privacy Act of 2012. For application or access assistance, contact your local MSWDO office.</p>
             <p className="text-[10px] text-slate-400/80 font-medium">
               Republic of the Philippines · Municipal Government · © 2026
             </p>
@@ -750,6 +788,7 @@ const Login = () => {
                     <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
                       type={showPassword ? "text" : "password"}
+                      autoComplete="new-password"
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
                       className="w-full pl-10 pr-10 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm font-medium"
@@ -772,6 +811,7 @@ const Login = () => {
                     <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
                       type={showPassword ? "text" : "password"}
+                      autoComplete="new-password"
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
                       className="w-full pl-10 pr-10 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm font-medium"

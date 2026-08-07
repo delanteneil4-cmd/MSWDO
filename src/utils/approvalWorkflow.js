@@ -1,4 +1,4 @@
-import { collection, addDoc, getDocs, query, where, serverTimestamp, doc, getDoc } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, where, serverTimestamp, doc, getDoc, updateDoc } from 'firebase/firestore';
 import emailjs from '@emailjs/browser';
 import {
   APPLICATION_STATUS,
@@ -28,7 +28,33 @@ export {
 export const EMAILJS_CONFIG = {
   serviceId: import.meta.env.VITE_EMAILJS_SERVICE_ID || 'service_qvc8npd',
   templateId: import.meta.env.VITE_EMAILJS_TEMPLATE_ID || 'template_51cxyho',
+  applicationTemplateId: import.meta.env.VITE_EMAILJS_APPLICATION_TEMPLATE_ID || 'template_zu8v1yj',
   publicKey: import.meta.env.VITE_EMAILJS_PUBLIC_KEY || 'q9RN6Ns1_Gi5N21B1',
+};
+
+export const sendApplicationReceivedEmail = async ({ email, applicantName, categoryName, applicationRef }) => {
+  if (!email) return;
+  if (!EMAILJS_CONFIG.applicationTemplateId) {
+    throw new Error('VITE_EMAILJS_APPLICATION_TEMPLATE_ID is not configured.');
+  }
+
+  await emailjs.send(
+    EMAILJS_CONFIG.serviceId,
+    EMAILJS_CONFIG.applicationTemplateId,
+    {
+      to_email: email,
+      to_name: applicantName || 'MSWDO Applicant',
+      applicant_name: applicantName || 'MSWDO Applicant',
+      category: categoryName,
+      application_ref: applicationRef,
+      status: APPLICATION_STATUS.pending,
+      message:
+        `Your MSWDO ${categoryName} application has been received. ` +
+        `Reference number: ${applicationRef}. Your application is still pending and must be reviewed and approved by MSWDO. ` +
+        `Login credentials will be emailed to you only after approval.`,
+    },
+    { publicKey: EMAILJS_CONFIG.publicKey }
+  );
 };
 
 export const isSuperAdminUser = (userData = {}) => {
@@ -55,6 +81,22 @@ export const generateSecurePassword = (length = 12) => {
   const array = new Uint8Array(length);
   crypto.getRandomValues(array);
   return Array.from(array, (byte) => charset[byte % charset.length]).join('');
+};
+
+export const generateTemporaryPassword = (lastName, birthDate) => {
+  const normalizedLastName = String(lastName || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .toLowerCase();
+  const dateParts = String(birthDate || '').split('-');
+
+  if (!normalizedLastName || dateParts.length !== 3) {
+    throw new Error('A valid last name and birthdate are required to create the temporary password.');
+  }
+
+  const [year, month, day] = dateParts;
+  return `${normalizedLastName}${month}${day}${year}`;
 };
 
 export const normalizeEmail = (email) => email?.trim().toLowerCase() || '';
@@ -107,22 +149,104 @@ export const buildMemberRecord = ({ application, categoryName, email, idNumber }
 });
 
 export const sendApprovalEmail = async ({ email, applicantName, categoryName, tempPassword, loginUrl }) => {
+  const categoryWithCredentials =
+    `${categoryName} | EMAIL: ${email} | TEMPORARY PASSWORD: ${tempPassword} | ` +
+    `PASSWORD FORMAT: lastname + birthdate (MMDDYYYY)`;
+  const credentialMessage =
+    `EMAIL: ${email} | ` +
+    `TEMPORARY PASSWORD: ${tempPassword} | ` +
+    `FORMAT: lastname + birthdate (MMDDYYYY). ` +
+    `Congratulations! Your application for the ${categoryName} program has been approved. ` +
+    `Your member account has been created. ` +
+    `Please log in at ${loginUrl} using the credentials above and change your password immediately on first login.`;
+  const recipientWithCredentials =
+    `${applicantName} | EMAIL: ${email} | TEMPORARY PASSWORD: ${tempPassword} | ` +
+    `FORMAT: lastname + birthdate (MMDDYYYY)`;
+
   await emailjs.send(
     EMAILJS_CONFIG.serviceId,
     EMAILJS_CONFIG.templateId,
     {
       to_email: email,
-      to_name: applicantName,
+      // The current remote template already renders to_name. Including the
+      // credentials here keeps older EmailJS templates compatible.
+      to_name: recipientWithCredentials,
+      applicant_name: applicantName,
       status: APPLICATION_STATUS.approved,
-      category: categoryName,
+      // category is rendered by the currently configured EmailJS template.
+      // Carry credentials in it as a fallback in case custom variables are
+      // omitted by the remote template configuration.
+      category: categoryWithCredentials,
+      category_name: categoryName,
+      email,
+      user_email: email,
+      login_email: email,
+      password: tempPassword,
+      temporary_password: tempPassword,
       temp_password: tempPassword,
       login_url: loginUrl,
-      message:
-        `Congratulations! Your application for the ${categoryName} program has been approved. ` +
-        `Your member account has been created. Please log in using the credentials below and change your password immediately on first login.`,
+      credentials: credentialMessage,
+      message: credentialMessage,
     },
     { publicKey: EMAILJS_CONFIG.publicKey }
   );
+};
+
+export const sendWorkflowEmail = async ({
+  email,
+  applicantName,
+  status,
+  categoryName,
+  benefitName = '',
+  amount = '',
+  subject = 'MSWDO account update',
+  message,
+}) => {
+  if (!email) return;
+  await emailjs.send(
+    EMAILJS_CONFIG.serviceId,
+    EMAILJS_CONFIG.templateId,
+    {
+      to_email: email,
+      to_name: applicantName || 'MSWDO Applicant',
+      subject,
+      status,
+      category: categoryName || '',
+      benefit_name: benefitName,
+      amount,
+      message,
+    },
+    { publicKey: EMAILJS_CONFIG.publicKey }
+  );
+};
+
+export const sendWorkflowEmailAndTrack = async ({ db, collectionName, recordId, ...emailData }) => {
+  if (!recordId) return { status: 'skipped' };
+  try {
+    await sendWorkflowEmail(emailData);
+  } catch (error) {
+    try {
+      await updateDoc(doc(db, collectionName, recordId), {
+        emailStatus: 'failed',
+        emailError: error.message || 'Email delivery failed',
+        emailFailedAt: serverTimestamp(),
+      });
+    } catch (trackingError) {
+      console.error('Email delivery tracking error:', trackingError);
+    }
+    throw error;
+  }
+
+  try {
+    await updateDoc(doc(db, collectionName, recordId), {
+      emailStatus: 'sent',
+      emailSentAt: serverTimestamp(),
+      emailError: '',
+    });
+  } catch (trackingError) {
+    console.error('Email sent but delivery status could not be tracked:', trackingError);
+  }
+  return { status: 'sent' };
 };
 
 export const logActivity = async (db, entry) => {

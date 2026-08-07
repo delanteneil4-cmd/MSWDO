@@ -20,7 +20,7 @@ import {
   COLLECTIONS,
   canAccessCategory,
   getAssignedCategories,
-  generateSecurePassword,
+  generateTemporaryPassword,
   normalizeEmail,
   checkExistingMemberByEmail,
   buildMemberRecord,
@@ -31,6 +31,15 @@ import {
   EMAILJS_CONFIG,
 } from './utils/approvalWorkflow';
 import emailjs from '@emailjs/browser';
+
+const REQUIRED_DOCUMENTS = {
+  senior: ['votersId', 'birthCert', 'selfie'],
+  pwd: ['validId', 'barangayClearance', 'selfie', 'medicalCert'],
+  women: ['validId', 'barangayClearance', 'selfie'],
+  youth: ['validId', 'barangayClearance', 'selfie'],
+};
+
+const documentLabel = (key) => key.replace(/([A-Z])/g, ' $1').replace(/^./, (value) => value.toUpperCase()).trim();
 
 // Initialize a secondary Firebase App for creating users without logging out the Admin
 let secondaryApp;
@@ -90,6 +99,7 @@ const ApplicationManagement = () => {
   const [actionLoading, setActionLoading] = useState(false);
   const [rejectionReason, setRejectionReason] = useState('');
   const [showRejectInput, setShowRejectInput] = useState(false);
+  const [verificationDialog, setVerificationDialog] = useState({ open: false, key: '', reason: '' });
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -175,6 +185,53 @@ const ApplicationManagement = () => {
     return true;
   };
 
+  const verificationStatus = (application, key) => application.documentVerification?.[key]?.status || 'Pending';
+
+  const hasVerifiedDocuments = (application) => {
+    const required = REQUIRED_DOCUMENTS[application.category] || [];
+    return required.every((key) => Boolean(application.documents?.[key]) && verificationStatus(application, key) === 'Verified');
+  };
+
+  const updateDocumentVerification = async (key, status, reason = '') => {
+    if (!selectedApp || !ensureCategoryAccess(selectedApp)) return;
+    setActionLoading(true);
+    try {
+      const staff = await getStaffInfo(db, auth.currentUser);
+      const verification = {
+        ...(selectedApp.documentVerification || {}),
+        [key]: {
+          status,
+          reason: reason.trim(),
+          verifiedAt: serverTimestamp(),
+          verifiedBy: { uid: staff.uid, email: staff.email, name: staff.name },
+        },
+      };
+      await updateDoc(doc(db, COLLECTIONS.applications, selectedApp.id), { documentVerification: verification });
+      await logActivity(db, {
+        action: `Document ${status}`,
+        type: status === 'Verified' ? 'document_verified' : 'document_rejected',
+        applicantName: `${selectedApp.firstName || ''} ${selectedApp.lastName || ''}`.trim(),
+        applicationId: selectedApp.id,
+        category: getCategoryName(selectedApp.category),
+        categoryId: selectedApp.category,
+        adminEmail: staff.email,
+        adminUid: staff.uid,
+        adminName: staff.name,
+        details: `${documentLabel(key)}${reason.trim() ? `: ${reason.trim()}` : ''}`,
+      });
+      setSelectedApp((current) => current ? { ...current, documentVerification: verification } : current);
+      setApplications((items) => items.map((item) => item.id === selectedApp.id ? { ...item, documentVerification: verification } : item));
+      setVerificationDialog({ open: false, key: '', reason: '' });
+    } catch (error) {
+      console.error('Document verification error:', error);
+      alert('The document status could not be updated.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const rejectDocument = (key) => setVerificationDialog({ open: true, key, reason: '' });
+
   const handleApprove = async () => {
     if (!selectedApp) return;
     if (!ensureCategoryAccess(selectedApp)) return;
@@ -197,7 +254,7 @@ const ApplicationManagement = () => {
         return;
       }
 
-      const tempPassword = generateSecurePassword();
+      const tempPassword = generateTemporaryPassword(selectedApp.lastName, selectedApp.dob);
       const categoryName = getCategoryName(selectedApp.category);
       const staff = await getStaffInfo(db, auth.currentUser);
       staff.applicantEmail = email;
@@ -376,7 +433,7 @@ const ApplicationManagement = () => {
             <NavItem icon={Gift} label="Benefits" onClick={() => navigate('/benefits')} />
             <NavItem icon={UserX} label="Termination" onClick={() => navigate('/termination')} />
             <NavItem icon={Bell} label="Announcements" onClick={() => navigate('/announcements')} />
-            <NavItem icon={BarChart2} label="Reports" />
+            <NavItem icon={BarChart2} label="Reports" onClick={() => navigate('/reports')} />
           </div>
           <div className="mt-8 mb-4 h-px w-full bg-white/5" />
           <div className="space-y-0.5">
@@ -602,9 +659,11 @@ const ApplicationManagement = () => {
                 <div className="space-y-6 border-l border-slate-100 pl-6">
                   <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2 mb-4">Uploaded Documents</h3>
                   
-                  {selectedApp.documents && Object.entries(selectedApp.documents).map(([key, url]) => (
-                    <div key={key} className="mb-4">
-                      <p className="text-[10px] text-slate-500 font-bold uppercase mb-2">{key.replace(/([A-Z])/g, ' $1').trim()}</p>
+                  {(REQUIRED_DOCUMENTS[selectedApp.category] || Object.keys(selectedApp.documents || {})).map((key) => {
+                    const url = selectedApp.documents?.[key];
+                    const status = verificationStatus(selectedApp, key);
+                    return <div key={key} className="mb-4 rounded-xl border border-slate-100 p-3">
+                      <div className="flex items-center justify-between gap-2 mb-2"><p className="text-[10px] text-slate-500 font-bold uppercase">{documentLabel(key)}</p><span className={`text-[9px] font-bold uppercase px-2 py-1 rounded-full ${status === 'Verified' ? 'bg-emerald-50 text-emerald-700' : status === 'Rejected' ? 'bg-red-50 text-red-700' : url ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{url ? status : 'Missing'}</span></div>
                       {url ? (
                         <a href={url} target="_blank" rel="noopener noreferrer" className="block group relative rounded-xl overflow-hidden border border-slate-200">
                           <img src={url} alt={key} loading="lazy" decoding="async" className="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300" />
@@ -615,8 +674,11 @@ const ApplicationManagement = () => {
                       ) : (
                         <div className="h-20 bg-slate-50 rounded-xl border border-dashed border-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-400">No Document</div>
                       )}
-                    </div>
-                  ))}
+                      {selectedApp.status === APPLICATION_STATUS.pending && url && <div className="mt-2 flex gap-2"><button type="button" onClick={() => updateDocumentVerification(key, 'Verified')} disabled={actionLoading || status === 'Verified'} className="flex-1 rounded-lg bg-emerald-50 px-2 py-1.5 text-[10px] font-bold text-emerald-700 disabled:opacity-50">Verify</button><button type="button" onClick={() => rejectDocument(key)} disabled={actionLoading} className="flex-1 rounded-lg bg-red-50 px-2 py-1.5 text-[10px] font-bold text-red-700 disabled:opacity-50">Reject</button></div>}
+                      {selectedApp.documentVerification?.[key]?.reason && <p className="mt-2 text-[10px] text-red-600">{selectedApp.documentVerification[key].reason}</p>}
+                    </div>;
+                  })}
+                  <div className="rounded-xl bg-slate-50 border border-slate-100 p-3"><p className="text-[10px] font-bold uppercase text-slate-400">Verification progress</p><p className="text-sm font-bold text-slate-700 mt-1">{(REQUIRED_DOCUMENTS[selectedApp.category] || []).filter((key) => verificationStatus(selectedApp, key) === 'Verified').length} of {(REQUIRED_DOCUMENTS[selectedApp.category] || []).length} required documents verified</p></div>
 
                   {/* Actions */}
                   {selectedApp.status === APPLICATION_STATUS.approved && selectedApp.approvedBy && (
@@ -639,7 +701,7 @@ const ApplicationManagement = () => {
                       {!showRejectInput ? (
                         <div className="space-y-3">
                           <button 
-                            onClick={handleApprove} disabled={actionLoading || !selectedApp.email?.trim()}
+                            onClick={handleApprove} disabled={actionLoading || !selectedApp.email?.trim() || !hasVerifiedDocuments(selectedApp)}
                             className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-60">
                             {actionLoading ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
                             Approve & Create Account
@@ -647,6 +709,7 @@ const ApplicationManagement = () => {
                           {!selectedApp.email?.trim() && (
                             <p className="text-[10px] text-orange-600 font-semibold text-center">Email address required to approve and send credentials.</p>
                           )}
+                          {!hasVerifiedDocuments(selectedApp) && <p className="text-[10px] text-orange-600 font-semibold text-center">Verify all required documents before approval.</p>}
                           <button 
                             onClick={() => setShowRejectInput(true)} disabled={actionLoading}
                             className="w-full bg-white hover:bg-red-50 text-red-500 border border-red-200 font-bold py-3 rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-60">
@@ -683,6 +746,16 @@ const ApplicationManagement = () => {
           </div>
         )}
       </AnimatePresence>
+      {verificationDialog.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-labelledby="document-rejection-title">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+            <h3 id="document-rejection-title" className="text-lg font-bold text-slate-800">Reject {documentLabel(verificationDialog.key)}</h3>
+            <p className="mt-1 text-sm text-slate-500">Explain what the applicant needs to correct or submit again.</p>
+            <textarea autoFocus rows="4" value={verificationDialog.reason} onChange={(event) => setVerificationDialog((value) => ({ ...value, reason: event.target.value }))} placeholder="Rejection reason is required" className="mt-4 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none focus:border-red-400" />
+            <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setVerificationDialog({ open: false, key: '', reason: '' })} className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-600">Cancel</button><button type="button" onClick={() => updateDocumentVerification(verificationDialog.key, 'Rejected', verificationDialog.reason)} disabled={!verificationDialog.reason.trim() || actionLoading} className="rounded-xl bg-red-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">{actionLoading ? 'Saving...' : 'Reject document'}</button></div>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );

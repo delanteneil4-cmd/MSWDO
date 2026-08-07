@@ -10,6 +10,36 @@ import { db } from './firebase';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { useCloudinaryUpload } from './hooks/useCloudinaryUpload';
 import { APPLICATION_STATUS, COLLECTIONS } from './utils/dataModel';
+import { getCategoryDisplayName, sendApplicationReceivedEmail } from './utils/approvalWorkflow';
+
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const ALLOWED_DOCUMENT_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+const REQUIRED_DOCUMENTS = {
+  senior: ['votersId', 'birthCert', 'selfie'],
+  pwd: ['validId', 'barangayClearance', 'selfie', 'medicalCert'],
+  women: ['validId', 'barangayClearance', 'selfie'],
+  youth: ['validId', 'barangayClearance', 'selfie'],
+};
+const DOCUMENT_LABELS = {
+  votersId: "Voter's ID",
+  birthCert: 'birth certificate',
+  selfie: 'selfie/photo',
+  validId: 'valid government ID',
+  barangayClearance: 'barangay clearance',
+  medicalCert: 'medical certificate/assessment',
+};
+
+const getAge = (birthDate) => {
+  const birth = new Date(`${birthDate}T00:00:00`);
+  if (!birthDate || Number.isNaN(birth.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - birth.getFullYear();
+  const monthDifference = today.getMonth() - birth.getMonth();
+  if (monthDifference < 0 || (monthDifference === 0 && today.getDate() < birth.getDate())) age -= 1;
+  return age;
+};
+
+const normalizeContactNumber = (value) => value.trim().replace(/[\s()-]/g, '');
 
 const Apply = () => {
   const navigate = useNavigate();
@@ -20,6 +50,7 @@ const Apply = () => {
   const [showSuccess, setShowSuccess] = useState(false);
   const [submittedReference, setSubmittedReference] = useState('');
   const [files, setFiles] = useState({});
+  const [validationErrors, setValidationErrors] = useState([]);
   const { uploadMultiple } = useCloudinaryUpload();
 
   // Common Fields
@@ -44,6 +75,7 @@ const Apply = () => {
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
+    setValidationErrors([]);
   };
 
   const categories = [
@@ -53,28 +85,110 @@ const Apply = () => {
     { id: 'youth', name: 'Youth Welfare', icon: GraduationCap, color: 'orange', desc: 'Aged 15 to 30 years old' }
   ];
 
+  const selectCategory = (categoryId) => {
+    setCategory(categoryId);
+    setValidationErrors([]);
+    if (categoryId === 'women') {
+      setFormData((current) => ({ ...current, gender: 'Female' }));
+    }
+  };
+
+  const validateDetails = () => {
+    const errors = [];
+    const requiredText = [
+      ['firstName', 'First name'], ['lastName', 'Last name'], ['address', 'Complete address'],
+      ['contactNumber', 'Contact number'], ['email', 'Email address'],
+    ];
+    requiredText.forEach(([key, label]) => {
+      if (!formData[key].trim()) errors.push(`${label} is required.`);
+    });
+
+    const email = formData.email.trim().toLowerCase();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.push('Enter a valid email address.');
+
+    const contact = normalizeContactNumber(formData.contactNumber);
+    if (contact && !/^(?:\+63|0)[0-9]{9,10}$/.test(contact)) {
+      errors.push('Enter a valid Philippine contact number, such as 09171234567 or +639171234567.');
+    }
+
+    const age = getAge(formData.dob);
+    if (age === null || age < 0) errors.push('Enter a valid birthdate that is not in the future.');
+    else if (category === 'senior' && age < 60) errors.push('Senior Citizen applicants must be at least 60 years old.');
+    else if (category === 'youth' && (age < 15 || age > 30)) errors.push('Youth Welfare applicants must be 15 to 30 years old.');
+
+    if (!formData.gender) errors.push('Gender is required.');
+    if (!formData.civilStatus) errors.push('Civil status is required.');
+    if (category === 'senior') {
+      if (formData.livingArrangement === 'rented' && (!formData.rentedYears || Number(formData.rentedYears) < 0)) errors.push('Enter valid years rented.');
+      if (formData.regularSupport === 'yes' && !formData.typeOfSupport) errors.push('Select the type of regular support.');
+      if (formData.regularSupport === 'yes' && !formData.howOftenSupport.trim()) errors.push('Enter how often support is received.');
+      if (formData.withDisability === 'yes' && !formData.disabilityDetails.trim()) errors.push('Describe the disability.');
+      if (formData.hasExistingIllness === 'yes' && !formData.illnessDetails.trim()) errors.push('Describe the existing illness.');
+      if (formData.annualIncome && Number(formData.annualIncome) < 0) errors.push('Annual income cannot be negative.');
+    }
+    if (category === 'pwd') {
+      if (!formData.disabilityType) errors.push('Disability type is required.');
+      if (!formData.disabilityCause) errors.push('Disability cause is required.');
+      if (formData.applicationType !== 'new' && !formData.pwdNumber.trim()) errors.push('PWD number is required for renewal or transfer applications.');
+      if (formData.accomplishedBy !== 'applicant' && !formData.guardianName.trim()) errors.push('Guardian or representative name is required.');
+    }
+    if (category === 'women' && formData.isSoloParent === 'yes' && formData.numberOfChildren === '') {
+      errors.push('Number of children is required for solo-parent applicants.');
+    }
+    if (category === 'youth') {
+      if (!formData.educationalAttainment) errors.push('Educational attainment is required.');
+      if (formData.outOfSchool === 'no' && !formData.schoolName.trim()) errors.push('School name is required for currently enrolled applicants.');
+    }
+
+    setValidationErrors(errors);
+    return errors.length === 0;
+  };
+
+  const validateDocuments = () => {
+    const missing = (REQUIRED_DOCUMENTS[category] || []).filter((key) => !files[key]);
+    const errors = missing.map((key) => `Upload the required ${DOCUMENT_LABELS[key]}.`);
+    setValidationErrors(errors);
+    return errors.length === 0;
+  };
+
   const handleNext = () => {
     if (step === 1 && !category) {
-      alert("Please select a category first.");
+      setValidationErrors(['Please select a beneficiary category.']);
       return;
     }
+    if (step === 2 && !validateDetails()) return;
+    setValidationErrors([]);
     setStep(prev => prev + 1);
   };
 
   const handleBack = () => {
+    setValidationErrors([]);
     setStep(prev => prev - 1);
   };
 
   const handleFileChange = (key, e) => {
-    if (e.target.files[0]) {
-      setFiles(prev => ({ ...prev, [key]: e.target.files[0] }));
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!ALLOWED_DOCUMENT_TYPES.includes(file.type) || (key === 'selfie' && !file.type.startsWith('image/'))) {
+      setValidationErrors([`${DOCUMENT_LABELS[key]} must be a JPG, PNG, WEBP${key === 'selfie' ? '' : ', or PDF'} file.`]);
+      e.target.value = '';
+      return;
     }
+    if (file.size > MAX_FILE_SIZE) {
+      setValidationErrors([`${DOCUMENT_LABELS[key]} must not exceed 5 MB.`]);
+      e.target.value = '';
+      return;
+    }
+    setValidationErrors([]);
+    setFiles(prev => ({ ...prev, [key]: file }));
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!validateDetails() || !validateDocuments()) return;
     setLoading(true);
     try {
+      const normalizedEmail = formData.email.trim().toLowerCase();
       const applicationRef = `MSWDO-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
       let uploadedUrls = {};
       if (Object.keys(files).length > 0) {
@@ -83,6 +197,13 @@ const Apply = () => {
 
       const applicationData = {
         ...formData,
+        firstName: formData.firstName.trim(),
+        middleName: formData.middleName.trim(),
+        lastName: formData.lastName.trim(),
+        address: formData.address.trim(),
+        contactNumber: normalizeContactNumber(formData.contactNumber),
+        email: normalizedEmail,
+        normalizedEmail,
         applicationRef,
         category,
         status: APPLICATION_STATUS.pending,
@@ -91,6 +212,12 @@ const Apply = () => {
       };
 
       await addDoc(collection(db, COLLECTIONS.applications), applicationData);
+      void sendApplicationReceivedEmail({
+        email: normalizedEmail,
+        applicantName: `${formData.firstName} ${formData.lastName}`.trim(),
+        categoryName: getCategoryDisplayName(category),
+        applicationRef,
+      }).catch((error) => console.error('Application submission email error:', error));
       
       setLoading(false);
       setUploadProgress(0);
@@ -125,15 +252,15 @@ const Apply = () => {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="space-y-1.5">
           <label className="block text-[11px] font-bold text-slate-500 uppercase">Date of Birth *</label>
-          <input required type="date" name="dob" value={formData.dob} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+          <input required type="date" name="dob" max={new Date().toISOString().slice(0, 10)} value={formData.dob} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
         </div>
         <div className="space-y-1.5">
           <label className="block text-[11px] font-bold text-slate-500 uppercase">Gender *</label>
           <select required name="gender" value={formData.gender} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none bg-white">
             <option value="">Select Gender</option>
-            <option value="Male">Male</option>
             <option value="Female">Female</option>
-            <option value="Other">Other</option>
+            {category !== 'women' && <option value="Male">Male</option>}
+            {category !== 'women' && <option value="Other">Other</option>}
           </select>
         </div>
         <div className="space-y-1.5">
@@ -156,7 +283,7 @@ const Apply = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="space-y-1.5">
           <label className="block text-[11px] font-bold text-slate-500 uppercase">Contact Number *</label>
-          <input required type="tel" name="contactNumber" value={formData.contactNumber} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+          <input required type="tel" name="contactNumber" inputMode="tel" maxLength="16" value={formData.contactNumber} onChange={handleInputChange} placeholder="09171234567" className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
         </div>
         <div className="space-y-1.5">
           <label className="block text-[11px] font-bold text-slate-500 uppercase">Email Address <span className="text-red-500">*</span></label>
@@ -213,7 +340,7 @@ const Apply = () => {
                       <option value="rented">Rented</option>
                     </select>
                     {formData.livingArrangement === 'rented' && (
-                      <input type="number" name="rentedYears" placeholder="Yrs" value={formData.rentedYears} onChange={handleInputChange} className="w-20 rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+                      <input required type="number" name="rentedYears" min="0" max="100" placeholder="Yrs" value={formData.rentedYears} onChange={handleInputChange} className="w-20 rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
                     )}
                   </div>
                 </div>
@@ -230,7 +357,7 @@ const Apply = () => {
                 </div>
                 <div className="space-y-1.5">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase">Annual Income</label>
-                  <input type="text" name="annualIncome" value={formData.annualIncome} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+                  <input type="number" name="annualIncome" min="0" step="0.01" value={formData.annualIncome} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
                 </div>
                 <div className="space-y-1.5">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase">Regular Support from Family?</label>
@@ -243,7 +370,7 @@ const Apply = () => {
                   <>
                     <div className="space-y-1.5">
                       <label className="block text-[11px] font-bold text-slate-500 uppercase">Type of Support</label>
-                      <select name="typeOfSupport" value={formData.typeOfSupport} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none bg-white">
+                      <select required name="typeOfSupport" value={formData.typeOfSupport} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none bg-white">
                         <option value="">Select Type</option>
                         <option value="cash">Cash</option>
                         <option value="in_kind">In-Kind</option>
@@ -251,7 +378,7 @@ const Apply = () => {
                     </div>
                     <div className="space-y-1.5">
                       <label className="block text-[11px] font-bold text-slate-500 uppercase">How Often?</label>
-                      <input type="text" name="howOftenSupport" value={formData.howOftenSupport} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+                      <input required type="text" name="howOftenSupport" value={formData.howOftenSupport} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
                     </div>
                   </>
                 )}
@@ -270,7 +397,7 @@ const Apply = () => {
                       <option value="yes">Yes</option>
                     </select>
                     {formData.withDisability === 'yes' && (
-                      <input type="text" name="disabilityDetails" placeholder="Please specify" value={formData.disabilityDetails} onChange={handleInputChange} className="flex-1 rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+                      <input required type="text" name="disabilityDetails" placeholder="Please specify" value={formData.disabilityDetails} onChange={handleInputChange} className="flex-1 rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
                     )}
                   </div>
                 </div>
@@ -282,7 +409,7 @@ const Apply = () => {
                       <option value="yes">Yes</option>
                     </select>
                     {formData.hasExistingIllness === 'yes' && (
-                      <input type="text" name="illnessDetails" placeholder="Please specify" value={formData.illnessDetails} onChange={handleInputChange} className="flex-1 rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+                      <input required type="text" name="illnessDetails" placeholder="Please specify" value={formData.illnessDetails} onChange={handleInputChange} className="flex-1 rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
                     )}
                   </div>
                 </div>
@@ -312,10 +439,10 @@ const Apply = () => {
                       <tr key={index}>
                         <td className="border p-1"><input type="text" value={member.name} onChange={(e) => { const newFam = [...formData.familyComposition]; newFam[index].name = e.target.value; setFormData(prev => ({...prev, familyComposition: newFam})) }} className="w-full text-xs p-1 outline-none" /></td>
                         <td className="border p-1"><input type="text" value={member.relation} onChange={(e) => { const newFam = [...formData.familyComposition]; newFam[index].relation = e.target.value; setFormData(prev => ({...prev, familyComposition: newFam})) }} className="w-full text-xs p-1 outline-none" /></td>
-                        <td className="border p-1"><input type="text" value={member.age} onChange={(e) => { const newFam = [...formData.familyComposition]; newFam[index].age = e.target.value; setFormData(prev => ({...prev, familyComposition: newFam})) }} className="w-full text-xs p-1 outline-none" /></td>
+                        <td className="border p-1"><input type="number" min="0" max="120" value={member.age} onChange={(e) => { const newFam = [...formData.familyComposition]; newFam[index].age = e.target.value; setFormData(prev => ({...prev, familyComposition: newFam})) }} className="w-full text-xs p-1 outline-none" /></td>
                         <td className="border p-1"><input type="text" value={member.status} onChange={(e) => { const newFam = [...formData.familyComposition]; newFam[index].status = e.target.value; setFormData(prev => ({...prev, familyComposition: newFam})) }} className="w-full text-xs p-1 outline-none" /></td>
                         <td className="border p-1"><input type="text" value={member.occupation} onChange={(e) => { const newFam = [...formData.familyComposition]; newFam[index].occupation = e.target.value; setFormData(prev => ({...prev, familyComposition: newFam})) }} className="w-full text-xs p-1 outline-none" /></td>
-                        <td className="border p-1"><input type="text" value={member.income} onChange={(e) => { const newFam = [...formData.familyComposition]; newFam[index].income = e.target.value; setFormData(prev => ({...prev, familyComposition: newFam})) }} className="w-full text-xs p-1 outline-none" /></td>
+                        <td className="border p-1"><input type="number" min="0" step="0.01" value={member.income} onChange={(e) => { const newFam = [...formData.familyComposition]; newFam[index].income = e.target.value; setFormData(prev => ({...prev, familyComposition: newFam})) }} className="w-full text-xs p-1 outline-none" /></td>
                       </tr>
                     ))}
                   </tbody>
@@ -342,7 +469,7 @@ const Apply = () => {
                 </div>
                 <div className="space-y-1.5">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase">PWD Number (If Renewal)</label>
-                  <input type="text" name="pwdNumber" value={formData.pwdNumber} onChange={handleInputChange} placeholder="RR-PPMM-BBB-NNNNNNN" className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+                  <input required={formData.applicationType !== 'new'} type="text" name="pwdNumber" value={formData.pwdNumber} onChange={handleInputChange} placeholder="RR-PPMM-BBB-NNNNNNN" className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
                 </div>
                 <div className="space-y-1.5">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase">Date Applied</label>
@@ -521,7 +648,7 @@ const Apply = () => {
                 </div>
                 <div className="space-y-1.5">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase">Guardian's Name (If applicable)</label>
-                  <input type="text" name="guardianName" value={formData.guardianName} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+                  <input required={formData.accomplishedBy !== 'applicant'} type="text" name="guardianName" value={formData.guardianName} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
                 </div>
                 <div className="space-y-1.5">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase">Accomplished By</label>
@@ -577,7 +704,7 @@ const Apply = () => {
               </div>
               <div className="space-y-1.5">
                 <label className="block text-[11px] font-bold text-slate-500 uppercase">Number of Children</label>
-                <input type="number" name="numberOfChildren" value={formData.numberOfChildren} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" min="0" />
+                <input required={formData.isSoloParent === 'yes'} type="number" name="numberOfChildren" value={formData.numberOfChildren} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" min="0" max="30" />
               </div>
               <div className="space-y-1.5 md:col-span-2">
                 <label className="block text-[11px] font-bold text-slate-500 uppercase">Current Occupation / Livelihood</label>
@@ -610,7 +737,7 @@ const Apply = () => {
               </div>
               <div className="space-y-1.5 md:col-span-2">
                 <label className="block text-[11px] font-bold text-slate-500 uppercase">Name of School (If applicable)</label>
-                <input type="text" name="schoolName" value={formData.schoolName} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
+                <input required={formData.outOfSchool === 'no'} type="text" name="schoolName" value={formData.schoolName} onChange={handleInputChange} className="w-full rounded-lg py-2.5 px-3 border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none" />
               </div>
             </div>
           </div>
@@ -733,7 +860,7 @@ const Apply = () => {
               </div>
               <h3 className="text-2xl font-bold text-slate-900 mb-2">Application Submitted!</h3>
               <p className="text-sm text-slate-500 mb-6">
-                Your applicant registration has been successfully submitted to the MSWDO. We will review your documents and notify you of the status.
+                Your program application has been successfully submitted to MSWDO. We will review your documents and notify you of the status.
               </p>
               <div className="bg-slate-50 rounded-xl p-4 mb-8 text-left border border-slate-100">
                 <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Reference Number</p>
@@ -759,8 +886,8 @@ const Apply = () => {
               <ShieldCheck size={20} />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-slate-900 leading-tight">MSWDO Applicant Registration</h1>
-              <p className="text-xs text-slate-500 font-medium">Municipal Social Welfare Portal</p>
+              <h1 className="text-xl font-bold text-slate-900 leading-tight">MSWDO Program Application</h1>
+              <p className="text-xs text-slate-500 font-medium">Apply for assistance and welfare programs</p>
             </div>
           </div>
           <button 
@@ -797,6 +924,19 @@ const Apply = () => {
           <div className="h-1.5 w-full bg-[#3b66df]"></div>
           
           <form onSubmit={step === 3 ? handleSubmit : (e) => { e.preventDefault(); handleNext(); }} className="p-8">
+            {validationErrors.length > 0 && (
+              <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4" role="alert" aria-live="polite">
+                <div className="flex items-start gap-3">
+                  <AlertCircle size={18} className="mt-0.5 shrink-0 text-red-500" />
+                  <div>
+                    <p className="text-sm font-bold text-red-800">Please correct the following:</p>
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-red-700">
+                      {validationErrors.map((error) => <li key={error}>{error}</li>)}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
             
             {/* Step 1: Category Selection */}
             {step === 1 && (
@@ -814,7 +954,7 @@ const Apply = () => {
                       <button
                         key={cat.id}
                         type="button"
-                        onClick={() => setCategory(cat.id)}
+                        onClick={() => selectCategory(cat.id)}
                         className={`p-6 rounded-xl border-2 text-left transition-all ${
                           isSelected 
                             ? 'border-[#3b66df] bg-blue-50/50 shadow-sm ring-4 ring-blue-50' 

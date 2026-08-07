@@ -19,13 +19,19 @@ service cloud.firestore {
       return currentUserDoc().data;
     }
 
+    function activeRecord(data) {
+      return !data.keys().hasAny(['status']) || data.status == 'Active';
+    }
+
     function isSuperAdmin() {
       return currentUserExists()
+        && activeRecord(currentUser())
         && currentUser().role in ['super', 'super admin', 'Super Admin'];
     }
 
     function isStaff() {
       return currentUserExists()
+        && activeRecord(currentUser())
         && (
           currentUser().role in ['Admin', 'admin', 'Staff', 'staff']
           || isSuperAdmin()
@@ -34,6 +40,7 @@ service cloud.firestore {
 
     function isApplicant() {
       return currentUserExists()
+        && activeRecord(currentUser())
         && (
           currentUser().role in ['applicant', 'Applicant']
           || currentUser().memberType == 'beneficiary'
@@ -82,6 +89,28 @@ service cloud.firestore {
         && applicantCategory() == category;
     }
 
+    function verifiedDocument(verification, key) {
+      return verification is map
+        && verification.keys().hasAll([key])
+        && verification[key] is map
+        && verification[key].status == 'Verified';
+    }
+
+    function requiredDocumentsVerified(category, verification) {
+      return category == 'senior'
+        ? verifiedDocument(verification, 'votersId')
+          && verifiedDocument(verification, 'birthCert')
+          && verifiedDocument(verification, 'selfie')
+        : category == 'pwd'
+          ? verifiedDocument(verification, 'validId')
+            && verifiedDocument(verification, 'barangayClearance')
+            && verifiedDocument(verification, 'selfie')
+            && verifiedDocument(verification, 'medicalCert')
+          : verifiedDocument(verification, 'validId')
+            && verifiedDocument(verification, 'barangayClearance')
+            && verifiedDocument(verification, 'selfie');
+    }
+
     function validClaimStatus(status) {
       return status in ['Pending', 'Under Review', 'Approved', 'Processed', 'Rejected', 'Cancelled'];
     }
@@ -117,11 +146,28 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['requiresPasswordChange']);
     }
 
+    function validMemberStatus(status) {
+      return status in ['Active', 'Inactive', 'Terminated'];
+    }
+
+    function validApplicantClaim() {
+      return canApplicantAccessCategory(request.resource.data.category)
+        && request.resource.data.memberId == request.auth.uid
+        && request.resource.data.status == 'Pending'
+        && request.resource.data.amount is number
+        && request.resource.data.amount >= 0
+        && request.resource.data.amount <= 1000000
+        && exists(/databases/$(database)/documents/benefits/$(request.resource.data.benefitId))
+        && get(/databases/$(database)/documents/benefits/$(request.resource.data.benefitId)).data.category == request.resource.data.category
+        && get(/databases/$(database)/documents/benefits/$(request.resource.data.benefitId)).data.status == 'Active';
+    }
+
     function staffMemberStatusUpdateOnly() {
       return isStaff()
         && isApplicantMemberRecord(resource.data)
         && canAccessCategory(resource.data.memberCategory)
         && request.resource.data.memberCategory == resource.data.memberCategory
+        && validMemberStatus(request.resource.data.status)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'status', 'updatedAt', 'terminatedAt', 'terminatedBy',
           'terminationReason', 'terminationId', 'restoredAt', 'restoredBy',
@@ -134,7 +180,9 @@ service cloud.firestore {
         && request.resource.data.status == 'Pending';
       allow read: if canAccessCategory(resource.data.category);
       allow update: if canAccessCategory(resource.data.category)
-        && request.resource.data.category == resource.data.category;
+        && request.resource.data.category == resource.data.category
+        && (request.resource.data.status != 'Approved'
+          || requiredDocumentsVerified(request.resource.data.category, request.resource.data.documentVerification));
       allow delete: if false;
     }
 
@@ -161,7 +209,11 @@ service cloud.firestore {
         && request.resource.data.memberId is string
         && request.resource.data.status in ['Terminated', 'Restored'];
       allow update: if canAccessCategory(resource.data.categoryId)
-        && request.resource.data.categoryId == resource.data.categoryId;
+        && request.resource.data.categoryId == resource.data.categoryId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'reason', 'updatedAt', 'updatedBy',
+          'emailStatus', 'emailSentAt', 'emailError', 'emailFailedAt'
+        ]);
       allow delete: if isSuperAdmin();
     }
 
@@ -185,11 +237,7 @@ service cloud.firestore {
       allow create: if (
           canAccessCategory(request.resource.data.category)
           && validClaimStatus(request.resource.data.status)
-        ) || (
-          canApplicantAccessCategory(request.resource.data.category)
-          && request.resource.data.memberId == request.auth.uid
-          && request.resource.data.status == 'Pending'
-        );
+        ) || validApplicantClaim();
       allow update: if (
           canAccessCategory(resource.data.category)
           && request.resource.data.category == resource.data.category
@@ -209,7 +257,8 @@ service cloud.firestore {
     }
 
     match /activity_logs/{logId} {
-      allow read, create: if isStaff();
+      allow read: if isSuperAdmin() || canAccessCategory(resource.data.categoryId);
+      allow create: if isStaff();
       allow update, delete: if false;
     }
 
@@ -237,8 +286,14 @@ service cloud.firestore {
       allow update: if isApplicant()
         && resource.data.memberId == request.auth.uid
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt']);
-      allow create: if isStaff();
-      allow delete: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.memberId is string
+        && validCategory(request.resource.data.categoryId)
+        && canAccessCategory(request.resource.data.categoryId)
+        && exists(/databases/$(database)/documents/users/$(request.resource.data.memberId))
+        && get(/databases/$(database)/documents/users/$(request.resource.data.memberId)).data.memberCategory == request.resource.data.categoryId
+        && request.resource.data.read == false;
+      allow delete: if isSuperAdmin() || canAccessCategory(resource.data.categoryId);
     }
 
     match /{document=**} {

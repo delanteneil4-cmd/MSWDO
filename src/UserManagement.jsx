@@ -11,7 +11,7 @@ import { auth, db, firebaseConfig } from './firebase';
 import { getAuth, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
 import { initializeApp, getApp } from 'firebase/app';
 import {
-  collection, getDocs, doc, setDoc, updateDoc, deleteDoc,
+  collection, getDocs, doc, setDoc, updateDoc,
   serverTimestamp, getDoc
 } from 'firebase/firestore';
 import { useNavigate } from 'react-router-dom';
@@ -230,6 +230,9 @@ const FormInput = ({ id, label, value, onChange, error, placeholder, type = 'tex
       <input
         id={id}
         type={type}
+        required={required}
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? `${id}-error` : hint ? `${id}-hint` : undefined}
         value={value}
         onChange={onChange}
         placeholder={placeholder}
@@ -244,9 +247,9 @@ const FormInput = ({ id, label, value, onChange, error, placeholder, type = 'tex
         }`}
       />
     </div>
-    {hint && !error && <p className="text-slate-400 text-[11px] font-medium mt-1">{hint}</p>}
+    {hint && !error && <p id={`${id}-hint`} className="text-slate-400 text-[11px] font-medium mt-1">{hint}</p>}
     {error && (
-      <p className="text-red-500 text-[11px] font-semibold mt-1.5 flex items-center gap-1">
+      <p id={`${id}-error`} className="text-red-500 text-[11px] font-semibold mt-1.5 flex items-center gap-1">
         <AlertCircle size={11} /> {error}
       </p>
     )}
@@ -326,11 +329,14 @@ const UserModal = ({ open, onClose, onSave, editData }) => {
     if (!isEdit && !form.tempPassword.trim()) {
       e.tempPassword = 'Temporary password is required.';
       valid = false;
-    } else if (!isEdit && form.tempPassword.length < 6) {
-      e.tempPassword = 'Password must be at least 6 characters.';
+    } else if (!isEdit && !/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(form.tempPassword)) {
+      e.tempPassword = 'Use at least 8 characters with uppercase, lowercase, and a number.';
       valid = false;
     }
     if (!form.birthDate)           { e.birthDate = 'Birth Date is required.'; valid = false; }
+    else if (new Date(`${form.birthDate}T00:00:00`) > new Date()) {
+      e.birthDate = 'Birth Date cannot be in the future.'; valid = false;
+    }
     if (!form.role)                { e.role = 'Role is required.'; valid = false; }
     if (!form.position)            { e.position = 'Position is required.'; valid = false; }
     if (form.role !== 'applicant' && form.assignedCategories.length === 0) {
@@ -844,9 +850,9 @@ const DeleteDialog = ({ open, onClose, onConfirm, user, loading }) => {
               <div className="w-14 h-14 bg-red-100 rounded-full flex items-center justify-center mb-4">
                 <Trash2 size={24} className="text-red-500" />
               </div>
-              <h3 className="text-base font-bold text-slate-800 mb-2">Delete User?</h3>
+              <h3 className="text-base font-bold text-slate-800 mb-2">Deactivate User?</h3>
               <p className="text-sm text-slate-500 font-medium mb-6">
-                Are you sure you want to delete <span className="font-bold text-slate-700">{fullName}</span>? This action cannot be undone.
+                Are you sure you want to deactivate <span className="font-bold text-slate-700">{fullName}</span>? Their record will be kept for history.
               </p>
               <div className="flex gap-3 w-full">
                 <button onClick={onClose}
@@ -975,6 +981,10 @@ const UserManagement = () => {
       selfieUrl:       formData.selfieUrl || '',
       updatedAt:       now,
     };
+    const duplicateId = users.find((user) => user.id !== id && String(user.idNumber || '').trim().toLowerCase() === payload.idNumber.toLowerCase());
+    if (duplicateId) throw new Error(`ID Number ${payload.idNumber} is already assigned to another user.`);
+    const duplicateEmail = users.find((user) => user.id !== id && String(user.email || '').trim().toLowerCase() === payload.email);
+    if (duplicateEmail) throw new Error(`Email ${payload.email} is already assigned to another user.`);
     if (id) {
       await updateDoc(doc(db, COLLECTIONS.users, id), payload);
     } else {
@@ -999,10 +1009,14 @@ const UserManagement = () => {
     if (!deleteUser) return;
     setDeleteLoading(true);
     try {
-      await deleteDoc(doc(db, COLLECTIONS.users, deleteUser.id));
+      await updateDoc(doc(db, COLLECTIONS.users, deleteUser.id), {
+        status: MEMBER_STATUS.inactive,
+        deactivatedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
       setDeleteUser(null);
       await fetchUsers();
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error('Deactivate user error:', e); }
     finally { setDeleteLoading(false); }
   };
 
@@ -1062,7 +1076,7 @@ const UserManagement = () => {
             <NavItem icon={FileText}     label="Record Tracking" onClick={() => navigate('/audit')} />
             <NavItem icon={XCircle}      label="Termination" onClick={() => navigate('/termination')} />
             <NavItem icon={Bell}         label="Announcements" onClick={() => navigate('/announcements')} />
-            <NavItem icon={BarChart2}    label="Reports" />
+            <NavItem icon={BarChart2}    label="Reports" onClick={() => navigate('/reports')} />
           </div>
           <div className="mt-8 mb-4 h-px w-full bg-white/5" />
           <div className="space-y-0.5">
@@ -1231,7 +1245,7 @@ const UserManagement = () => {
                                 }`}>
                                 <Lock size={14} />
                               </button>
-                              <button id={`delete-${u.id}`} onClick={() => setDeleteUser(u)} title="Delete"
+                              <button id={`delete-${u.id}`} onClick={() => setDeleteUser(u)} title="Deactivate account"
                                 className="w-8 h-8 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 flex items-center justify-center transition-colors">
                                 <Trash2 size={14} />
                               </button>

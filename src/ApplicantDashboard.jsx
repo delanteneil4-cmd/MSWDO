@@ -7,7 +7,7 @@ import { auth, db } from './firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { addDoc, collection, doc, getDoc, getDocs, query, serverTimestamp, updateDoc, where } from 'firebase/firestore';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { getCategoryDisplayName } from './utils/approvalWorkflow';
+import { getCategoryDisplayName, sendWorkflowEmailAndTrack } from './utils/approvalWorkflow';
 import { useCloudinaryUpload } from './hooks/useCloudinaryUpload';
 import {
   APPLICATION_STATUS,
@@ -58,6 +58,13 @@ const getRequiredDocumentCount = (category) => {
   return 3;
 };
 
+const REQUIRED_DOCUMENT_KEYS = {
+  senior: ['votersId', 'birthCert', 'selfie'],
+  pwd: ['validId', 'barangayClearance', 'selfie', 'medicalCert'],
+  women: ['validId', 'barangayClearance', 'selfie'],
+  youth: ['validId', 'barangayClearance', 'selfie'],
+};
+
 const formatCurrency = (value) =>
   Number(value || 0).toLocaleString('en-PH', {
     style: 'currency',
@@ -94,6 +101,7 @@ const ApplicantDashboard = () => {
   const [claimDocuments, setClaimDocuments] = useState({});
   const [uploadProgress, setUploadProgress] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [cancelDialog, setCancelDialog] = useState({ open: false, claim: null, reason: '' });
   const { uploadImage } = useCloudinaryUpload();
 
   useEffect(() => {
@@ -247,7 +255,7 @@ const ApplicantDashboard = () => {
       const supportingDocumentUrl = supportingFile
         ? await uploadImage(supportingFile, 'mswdo/claim-documents', setUploadProgress)
         : '';
-      await addDoc(collection(db, COLLECTIONS.claims), {
+      const claimRef = await addDoc(collection(db, COLLECTIONS.claims), {
         memberId: member.id,
         memberName,
         memberIdNumber: member.idNumber || '',
@@ -277,6 +285,19 @@ const ApplicantDashboard = () => {
           },
         ],
       });
+      void sendWorkflowEmailAndTrack({
+        db,
+        collectionName: COLLECTIONS.claims,
+        recordId: claimRef.id,
+        email: member.email || email,
+        applicantName: memberName,
+        status: CLAIM_STATUS.pending,
+        categoryName,
+        benefitName: benefit.name,
+        amount: formatCurrency(benefit.defaultAmount || 0),
+        subject: 'Your MSWDO benefit claim was submitted',
+        message: `Your ${benefit.name} benefit request was submitted and is now pending staff review.`,
+      }).catch((error) => console.error('Submitted claim email error:', error));
       setClaimDocuments((items) => ({ ...items, [benefit.id]: null }));
       setUploadProgress(0);
       await fetchApplicantBenefits(member);
@@ -289,10 +310,14 @@ const ApplicantDashboard = () => {
     }
   };
 
-  const handleCancelClaim = async (claim) => {
+  const handleCancelClaim = (claim) => {
     if (!member || !claim || claim.status !== CLAIM_STATUS.pending) return;
-    const reason = window.prompt('Reason for cancelling this benefit request:');
-    if (!reason?.trim()) return;
+    setCancelDialog({ open: true, claim, reason: '' });
+  };
+
+  const confirmCancelClaim = async () => {
+    const { claim, reason } = cancelDialog;
+    if (!claim || !reason.trim()) return;
 
     setActionLoading(true);
     try {
@@ -328,6 +353,7 @@ const ApplicantDashboard = () => {
       alert('Failed to cancel benefit request.');
     } finally {
       setActionLoading(false);
+      setCancelDialog({ open: false, claim: null, reason: '' });
     }
   };
 
@@ -340,6 +366,9 @@ const ApplicantDashboard = () => {
   const status = profile.status || sourceApplication.status || APPLICATION_STATUS.pending;
   const idNumber = profile.idNumber || sourceApplication.applicationRef || sourceApplication.id || 'Pending';
   const documents = profile.documents || sourceApplication.documents || {};
+  const documentVerification = profile.documentVerification || sourceApplication.documentVerification || {};
+  const requiredDocumentKeys = REQUIRED_DOCUMENT_KEYS[category] || [];
+  const documentKeys = [...new Set([...requiredDocumentKeys, ...Object.keys(documents)])];
   const submittedDocuments = Object.values(documents).filter(Boolean).length;
   const requiredDocuments = Math.max(Object.keys(documents).length || 0, getRequiredDocumentCount(category));
   const address = profile.address || sourceApplication.address || 'Address not recorded';
@@ -420,6 +449,16 @@ const ApplicantDashboard = () => {
             <span className="text-sm font-semibold">Logout</span>
           </button>
         </div>
+        {cancelDialog.open && (
+          <div className="fixed inset-0 z-50 bg-slate-950/45 p-4 flex items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="cancel-claim-title">
+            <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl border border-slate-200 p-6">
+              <h3 id="cancel-claim-title" className="text-lg font-bold text-slate-800">Cancel benefit request</h3>
+              <p className="text-sm text-slate-500 mt-1">Enter a reason for cancelling {cancelDialog.claim?.benefitName || 'this request'}.</p>
+              <textarea autoFocus rows="4" value={cancelDialog.reason} onChange={(event) => setCancelDialog((value) => ({ ...value, reason: event.target.value }))} placeholder="Reason is required" className="mt-4 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none focus:border-teal-400 resize-none" />
+              <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setCancelDialog({ open: false, claim: null, reason: '' })} className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-bold text-slate-600">Keep request</button><button type="button" onClick={confirmCancelClaim} disabled={!cancelDialog.reason.trim() || actionLoading} className="px-4 py-2 rounded-xl bg-red-600 text-white text-sm font-bold disabled:opacity-50">{actionLoading ? 'Cancelling...' : 'Confirm cancellation'}</button></div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 flex flex-col h-full overflow-hidden">
@@ -476,6 +515,11 @@ const ApplicantDashboard = () => {
               <div className="divide-y divide-slate-50">
                 {activeView === 'notifications' ? (notifications.length === 0 ? <div className="p-10 text-center text-sm text-slate-500">You have no notifications.</div> : notifications.map((item) => <article key={item.id} className={`p-6 ${item.read ? '' : 'bg-amber-50/30'}`}><div className="flex items-start justify-between gap-4"><div><h4 className="text-sm font-bold text-slate-800">{item.title}</h4><p className="text-[10px] text-slate-400 mt-1">{formatDate(item.createdAt)}</p></div><Bell size={16} className={item.read ? 'text-slate-300 shrink-0' : 'text-amber-500 shrink-0'} /></div><p className="mt-3 text-sm text-slate-600 leading-relaxed whitespace-pre-line">{item.body}</p></article>)) : (announcements.length === 0 ? <div className="p-10 text-center text-sm text-slate-500">There are no announcements for your category right now.</div> : announcements.map((item) => <article key={item.id} className="p-6 hover:bg-slate-50/60 transition-colors"><div className="flex items-start justify-between gap-4"><div><div className="flex items-center gap-2"><h4 className="text-sm font-bold text-slate-800">{item.title}</h4>{item.pinned && <span className="text-[9px] uppercase font-bold text-amber-700 bg-amber-50 px-2 py-1 rounded-full">Pinned</span>}</div><p className="text-[10px] text-slate-400 mt-1">{formatDate(item.createdAt)}{item.expiresAt ? ` · Until ${formatDate(item.expiresAt)}` : ''}</p></div><Bell size={16} className="text-teal-500 shrink-0" /></div><p className="mt-4 text-sm text-slate-600 leading-relaxed whitespace-pre-line">{item.body}</p></article>))}
               </div>
+            </div>
+          ) : activeView === 'documents' ? (
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+              <div className="px-6 py-5 border-b border-slate-100"><h3 className="text-base font-bold text-slate-800">My Documents</h3><p className="text-xs text-slate-400 mt-1">Review status for your submitted requirements</p></div>
+              <div className="divide-y divide-slate-50">{documentKeys.map((key) => { const url = documents[key]; const review = documentVerification[key] || {}; const reviewStatus = url ? (review.status || 'Pending') : 'Missing'; return <div key={key} className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"><div><p className="text-sm font-bold text-slate-800">{key.replace(/([A-Z])/g, ' $1').replace(/^./, (value) => value.toUpperCase()).trim()}</p>{review.reason && <p className="mt-1 text-xs text-red-600">Correction needed: {review.reason}</p>}</div><div className="flex items-center gap-3">{url && <a href={url} target="_blank" rel="noopener noreferrer" className="text-xs font-bold text-blue-600 hover:underline">View document</a>}<span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase ${reviewStatus === 'Verified' ? 'bg-emerald-50 text-emerald-700' : reviewStatus === 'Rejected' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'}`}>{reviewStatus}</span></div></div>; })}</div>
             </div>
           ) : activeView === 'benefits' ? (
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">

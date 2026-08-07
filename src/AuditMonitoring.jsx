@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { BarChart2, Bell, ChevronDown, ClipboardList, Database, Download, FileText, Fingerprint, Gift, Loader2, LogOut, Menu, Search, Settings, UserPlus, UserX, Users } from 'lucide-react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { collection, getDocs, getDoc, doc } from 'firebase/firestore';
+import { collection, getDocs, getDoc, doc, query, where } from 'firebase/firestore';
 import { useNavigate } from 'react-router-dom';
 import { auth, db } from './firebase';
 import { CATEGORY_OPTIONS, COLLECTIONS } from './utils/dataModel';
-import { getAssignedCategories } from './utils/approvalWorkflow';
+import { getAssignedCategories, isSuperAdminUser } from './utils/approvalWorkflow';
 
 const NavItem = ({ icon: Icon, label, active, onClick, badge }) => (
   <button type="button" onClick={onClick} disabled={!onClick} title={!onClick ? `${label} is not available yet` : undefined} className={`w-full flex items-center justify-between px-4 py-3 rounded-xl mb-1 transition-all ${active ? 'bg-teal-400/10 text-teal-300 border-l-2 border-teal-300' : onClick ? 'text-slate-400 hover:bg-white/5 hover:text-slate-200' : 'text-slate-600/70 cursor-not-allowed'}`}>
@@ -29,12 +29,14 @@ const AuditMonitoring = () => {
   const [dateTo, setDateTo] = useState('');
   const [loading, setLoading] = useState(true);
 
-  const loadLogs = async (categories) => {
+  const loadLogs = async (categories, isSuperAdmin) => {
     setLoading(true);
     try {
-      const snapshot = await getDocs(collection(db, COLLECTIONS.activityLogs));
-      const visibleLogs = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }))
-        .filter((item) => categories.includes(item.categoryId))
+      const snapshots = isSuperAdmin
+        ? [await getDocs(collection(db, COLLECTIONS.activityLogs))]
+        : await Promise.all(categories.map((categoryId) => getDocs(query(collection(db, COLLECTIONS.activityLogs), where('categoryId', '==', categoryId)))));
+      const visibleLogs = snapshots.flatMap((snapshot) => snapshot.docs.map((item) => ({ id: item.id, ...item.data() })))
+        .filter((item) => isSuperAdmin || categories.includes(item.categoryId))
         .sort((a, b) => timestampValue(b.timestamp) - timestampValue(a.timestamp));
       setLogs(visibleLogs);
     } catch (error) {
@@ -48,9 +50,10 @@ const AuditMonitoring = () => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (!user) { navigate('/'); return; }
       const profile = await getDoc(doc(db, COLLECTIONS.users, user.uid));
-      const categories = getAssignedCategories(profile.exists() ? profile.data() : {});
+      const profileData = profile.exists() ? profile.data() : {};
+      const categories = getAssignedCategories(profileData);
       setAssignedCategories(categories);
-      await loadLogs(categories);
+      await loadLogs(categories, isSuperAdminUser(profileData));
     });
     return () => unsubscribe();
   }, [navigate]);
@@ -87,7 +90,7 @@ const AuditMonitoring = () => {
         <div className="p-6"><h1 className="text-white font-bold tracking-wide text-sm">MSWDO</h1><p className="text-blue-400 text-[10px] uppercase font-bold tracking-widest">Admin Panel</p></div>
         <div className="px-6 py-2 flex-1 overflow-y-auto"><p className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-4">Navigation</p>
           <NavItem icon={Menu} label="Dashboard" onClick={() => navigate('/dashboard')} /><NavItem icon={Users} label="Membership" onClick={() => navigate('/membership')} /><NavItem icon={ClipboardList} label="Applications" onClick={() => navigate('/applications')} /><NavItem icon={Gift} label="Benefits" onClick={() => navigate('/benefits')} /><NavItem icon={UserX} label="Termination" onClick={() => navigate('/termination')} /><NavItem icon={FileText} label="Record Tracking" active />
-          <NavItem icon={Bell} label="Announcements" onClick={() => navigate('/announcements')} /><NavItem icon={BarChart2} label="Reports" />
+          <NavItem icon={Bell} label="Announcements" onClick={() => navigate('/announcements')} /><NavItem icon={BarChart2} label="Reports" onClick={() => navigate('/reports')} />
           <div className="my-6 h-px bg-white/5" /><NavItem icon={Database} label="CMS" badge="SA" /><NavItem icon={Fingerprint} label="Audit & Monitoring" active badge="SA" onClick={() => navigate('/audit')} /><NavItem icon={UserPlus} label="User Management" badge="SA" onClick={() => navigate('/user-management')} /><NavItem icon={Settings} label="Settings" badge="SA" />
         </div>
         <button onClick={() => signOut(auth).then(() => navigate('/'))} className="m-6 flex items-center gap-3 text-slate-400 hover:text-red-400"><LogOut size={18} /><span className="text-sm font-semibold">Logout</span></button>

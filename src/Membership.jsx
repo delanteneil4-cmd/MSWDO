@@ -127,7 +127,7 @@ const Membership = () => {
             <NavItem icon={Gift} label="Benefits" onClick={() => navigate('/benefits')} />
             <NavItem icon={UserX} label="Termination" onClick={() => navigate('/termination')} />
             <NavItem icon={Bell} label="Announcements" onClick={() => navigate('/announcements')} />
-            <NavItem icon={BarChart2} label="Reports" />
+            <NavItem icon={BarChart2} label="Reports" onClick={() => navigate('/reports')} />
           </div>
           <div className="mt-8 mb-4 h-px w-full bg-white/5" />
           <div className="space-y-0.5">

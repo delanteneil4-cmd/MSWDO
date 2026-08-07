@@ -80,6 +80,7 @@ Required core fields:
 | `contactNumber` | string | Applicant contact number |
 | `address` | string | Applicant complete address |
 | `documents` | map | Upload key to Cloudinary URL |
+| `documentVerification` | map | Per-document review records: `status`, `reason`, `verifiedAt`, and `verifiedBy` |
 
 Approval fields:
 
